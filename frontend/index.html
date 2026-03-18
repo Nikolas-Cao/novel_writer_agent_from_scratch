@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Novel Writer Agent</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <h1>Novel Writer Agent</h1>
+      <p class="subtitle">从灵感到分章长篇，一站式创作工作台</p>
+    </div>
+    <div id="global-status" class="status">就绪</div>
+  </header>
+
+  <main class="layout">
+    <section class="panel panel-list">
+      <h2>项目列表</h2>
+      <div class="panel-list-actions">
+        <button type="button" id="btn-refresh-projects">刷新项目</button>
+        <button type="button" id="btn-new-project">新建项目</button>
+      </div>
+      <ul id="project-list" class="list"></ul>
+    </section>
+
+    <section class="panel panel-create">
+      <h2>新建小说</h2>
+      <label>创作意图</label>
+      <textarea id="instruction-input" rows="4" placeholder="例如：都市悬疑，雨夜失踪案"></textarea>
+      <div class="row">
+        <button type="button" id="btn-create-and-ideas">创建并生成概要</button>
+        <button type="button" id="btn-refresh-ideas">刷新概要</button>
+      </div>
+      <div id="plot-ideas-section" hidden>
+        <label>剧情概要候选（请选择一条）</label>
+        <div id="plot-ideas" class="cards"></div>
+        <div id="selected-idea-view" class="selected-idea">当前未选择剧情概要</div>
+      </div>
+
+      <label>自定义概要（可选）</label>
+      <textarea id="custom-summary-input" rows="3" placeholder="不选候选时可直接输入"></textarea>
+      <label for="total-chapters-input">目标章节数量</label>
+      <input
+        type="number"
+        id="total-chapters-input"
+        min="1"
+        step="1"
+        placeholder="例如：100"
+      />
+      <div class="row">
+        <button type="button" id="btn-generate-outline">生成大纲</button>
+      </div>
+    </section>
+
+    <section class="panel panel-detail">
+      <h2>项目详情</h2>
+      <div class="detail-grid">
+        <div class="detail-col detail-col-left">
+          <div id="project-meta" class="meta"></div>
+
+          <h3>大纲</h3>
+          <div id="outline-view"></div>
+        </div>
+
+        <div class="detail-col detail-col-right">
+          <h3>章节</h3>
+          <ul id="chapter-list" class="list"></ul>
+
+          <h3>章节正文（Markdown 渲染）</h3>
+          <div id="chapter-view" class="markdown"></div>
+          <div class="row">
+            <button type="button" id="btn-view-chapter-modal">弹窗查看章节全文</button>
+            <button type="button" id="btn-view-character-graph-modal">弹窗查看人物关系</button>
+          </div>
+
+          <div id="feedback-rewrite-section">
+            <h3>反馈重写</h3>
+            <textarea id="feedback-input" rows="3" placeholder="例如：把结尾改得更悬疑"></textarea>
+            <label class="checkbox">
+              <input type="checkbox" id="update-outline-checkbox" />
+              同时更新大纲
+            </label>
+          </div>
+          <div class="row">
+            <button type="button" id="btn-next-chapter">续写下一章</button>
+            <button type="button" id="btn-rollback-tail">回滚到本章（删除后续）</button>
+            <button type="button" id="btn-regenerate-chapter">重新生成本章</button>
+            <button type="button" id="btn-rewrite">提交反馈重写</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 用 Live Server 打开时（5500）自动把 API 请求转到后端 8000 -->
+  <script>
+    window.API_BASE = window.location.port === "5500" ? "http://127.0.0.1:8000" : "";
+  </script>
+  <div id="chapter-modal" class="modal" hidden>
+    <div class="modal-backdrop" data-close="true"></div>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="chapter-modal-title">
+      <div class="modal-head">
+        <h3 id="chapter-modal-title">章节全文</h3>
+        <button type="button" id="btn-close-chapter-modal" class="btn-modal-close">关闭</button>
+      </div>
+      <div id="chapter-modal-content" class="modal-content markdown"></div>
+    </div>
+  </div>
+  <div id="character-graph-modal" class="modal" hidden>
+    <div class="modal-backdrop" data-close-graph="true"></div>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="character-graph-modal-title">
+      <div class="modal-head">
+        <h3 id="character-graph-modal-title">人物关系（按当前章节）</h3>
+        <button type="button" id="btn-close-character-graph-modal" class="btn-modal-close">关闭</button>
+      </div>
+      <div id="character-graph-modal-content" class="modal-content graph-modal-content"></div>
+    </div>
+  </div>
+  <script src="./app.js"></script>
+</body>
+</html>

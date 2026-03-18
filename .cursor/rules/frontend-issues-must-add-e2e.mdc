@@ -1,0 +1,21 @@
+---
+description: 前端问题必须补充 Playwright 回归用例；先写测试再修复
+alwaysApply: true
+---
+
+# 前端问题回归测试规则（必须执行）
+
+- 以后用户每次汇报**前端问题/前端 bug/UI 异常**，在开始修复前，必须先把问题转成**可复现的自动化用例**并加入仓库。
+
+- **默认测试框架**：Playwright Node（`@playwright/test`），用例放在 `e2e/`，通过 `npm run test:ui` 执行。
+
+- **流程要求**：
+  - 先补用例：新增/更新 `e2e/*.spec.ts`，让用例在“修复前”能稳定复现（失败）或至少锁定触发路径。
+  - 再修复代码。
+  - 最后确保 `npm run test:ui` 全绿，并把该用例作为回归保护。
+
+- **稳定性要求**：
+  - 优先覆盖不依赖 LLM 的流程（例如项目列表刷新、打开项目、阅读章节等）。
+  - 选择器优先 `getByRole` 或 `locator("#id")`，避免模糊 `getByText` 造成 strict mode 冲突。
+  - 等待条件用 `expect(...).toBeVisible()/toContainText()` 等显式断言，避免 `waitForTimeout`。
+

@@ -1,0 +1,1080 @@
+const API_BASE = typeof window !== "undefined" && window.API_BASE ? window.API_BASE : "";
+
+function installLiveServerReloadGuard() {
+  if (typeof window === "undefined") return;
+  const isLocalDevPort = window.location && window.location.port === "5500";
+  if (!isLocalDevPort || typeof window.WebSocket !== "function") return;
+
+  const NativeWebSocket = window.WebSocket;
+  const shouldBlockLiveReloadSocket = (url) => {
+    try {
+      const parsed = new URL(String(url), window.location.href);
+      const isWs = parsed.protocol === "ws:" || parsed.protocol === "wss:";
+      const sameHost = parsed.hostname === window.location.hostname;
+      const isLiveReloadEndpoint = /\/ws$/i.test(parsed.pathname || "");
+      return isWs && sameHost && isLiveReloadEndpoint;
+    } catch (_) {
+      return false;
+    }
+  };
+
+  function WrappedWebSocket(url, protocols) {
+    if (shouldBlockLiveReloadSocket(url)) {
+      // 阻止 Live Server 自动热重载，避免后端写文件时前端被整页刷新。
+      return {
+        readyState: NativeWebSocket.CLOSED,
+        close: () => {},
+        send: () => {},
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        dispatchEvent: () => false,
+        onopen: null,
+        onmessage: null,
+        onerror: null,
+        onclose: null,
+      };
+    }
+    if (typeof protocols === "undefined") {
+      return new NativeWebSocket(url);
+    }
+    return new NativeWebSocket(url, protocols);
+  }
+
+  WrappedWebSocket.prototype = NativeWebSocket.prototype;
+  WrappedWebSocket.CONNECTING = NativeWebSocket.CONNECTING;
+  WrappedWebSocket.OPEN = NativeWebSocket.OPEN;
+  WrappedWebSocket.CLOSING = NativeWebSocket.CLOSING;
+  WrappedWebSocket.CLOSED = NativeWebSocket.CLOSED;
+  window.WebSocket = WrappedWebSocket;
+}
+
+installLiveServerReloadGuard();
+function apiUrl(url) {
+  return API_BASE + url;
+}
+const api = {
+  get: (url) => {
+    const full = apiUrl(url);
+    console.log("[API] GET", full);
+    return fetch(full)
+      .catch((err) => {
+        throw normalizeNetworkError(err, full);
+      })
+      .then(ensureOk)
+      .then((r) => r.json());
+  },
+  post: (url, body) => {
+    const full = apiUrl(url);
+    console.log("[API] POST", full, body);
+    return fetch(full, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    })
+      .catch((err) => {
+        throw normalizeNetworkError(err, full);
+      })
+      .then(ensureOk)
+      .then((r) => r.json());
+  },
+  delete: (url) => {
+    const full = apiUrl(url);
+    console.log("[API] DELETE", full);
+    return fetch(full, { method: "DELETE" })
+      .catch((err) => {
+        throw normalizeNetworkError(err, full);
+      })
+      .then(ensureOk)
+      .then((r) => r.json());
+  },
+};
+
+function normalizeNetworkError(err, fullUrl) {
+  const msg = (err && err.message) || "";
+  if (msg === "Failed to fetch" || err instanceof TypeError) {
+    return new Error(
+      `无法连接后端（${fullUrl}）。请确认后端已启动：py -m uvicorn server:app --host 127.0.0.1 --port 8000`
+    );
+  }
+  return err instanceof Error ? err : new Error(String(err));
+}
+
+function ensureOk(resp) {
+  if (!resp.ok) {
+    return resp.text().then((t) => {
+      throw new Error(extractBackendErrorMessage(resp, t));
+    });
+  }
+  return resp;
+}
+
+function extractBackendErrorMessage(resp, rawText) {
+  const text = String(rawText || "").trim();
+  if (!text) return `HTTP ${resp.status}`;
+  const contentType = (resp.headers && resp.headers.get("content-type")) || "";
+  if (contentType.includes("application/json")) {
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed.detail === "string" && parsed.detail.trim()) {
+        return parsed.detail.trim();
+      }
+      if (parsed && typeof parsed.message === "string" && parsed.message.trim()) {
+        return parsed.message.trim();
+      }
+    } catch (_) {
+      // JSON 解析失败时继续走文本兜底。
+    }
+  }
+  // 兜底：移除 HTML 标签，避免把整段错误页面灌进状态栏。
+  return text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+const state = {
+  currentProjectId: null,
+  projectIds: [],
+  projectPreviews: {},
+  plotIdeas: [],
+  selectedIdea: "",
+  expandedIdeaIndex: null,
+  currentChapterIndex: null,
+  selectedChapterIndex: null,
+  chapterMetas: [],
+  currentChapterCharacterGraph: null,
+  isGeneratingOutline: false,
+  isChapterWriteInProgress: false,
+};
+
+const el = {
+  layout: document.querySelector(".layout"),
+  status: document.getElementById("global-status"),
+  panelCreate: document.querySelector(".panel-create"),
+  panelDetail: document.querySelector(".panel-detail"),
+  plotIdeasSection: document.getElementById("plot-ideas-section"),
+  projectList: document.getElementById("project-list"),
+  instruction: document.getElementById("instruction-input"),
+  plotIdeas: document.getElementById("plot-ideas"),
+  customSummary: document.getElementById("custom-summary-input"),
+  totalChapters: document.getElementById("total-chapters-input"),
+  selectedIdeaView: document.getElementById("selected-idea-view"),
+  projectMeta: document.getElementById("project-meta"),
+  outlineView: document.getElementById("outline-view"),
+  chapterList: document.getElementById("chapter-list"),
+  chapterView: document.getElementById("chapter-view"),
+  chapterModal: document.getElementById("chapter-modal"),
+  chapterModalContent: document.getElementById("chapter-modal-content"),
+  characterGraphModal: document.getElementById("character-graph-modal"),
+  characterGraphModalContent: document.getElementById("character-graph-modal-content"),
+  btnViewChapterModal: document.getElementById("btn-view-chapter-modal"),
+  btnViewCharacterGraphModal: document.getElementById("btn-view-character-graph-modal"),
+  btnCloseChapterModal: document.getElementById("btn-close-chapter-modal"),
+  btnCloseCharacterGraphModal: document.getElementById("btn-close-character-graph-modal"),
+  feedbackRewriteSection: document.getElementById("feedback-rewrite-section"),
+  feedback: document.getElementById("feedback-input"),
+  updateOutline: document.getElementById("update-outline-checkbox"),
+  btnRefreshProjects: document.getElementById("btn-refresh-projects"),
+  btnNewProject: document.getElementById("btn-new-project"),
+  btnCreateAndIdeas: document.getElementById("btn-create-and-ideas"),
+  btnRefreshIdeas: document.getElementById("btn-refresh-ideas"),
+  btnGenerateOutline: document.getElementById("btn-generate-outline"),
+  btnNextChapter: document.getElementById("btn-next-chapter"),
+  btnRollbackTail: document.getElementById("btn-rollback-tail"),
+  btnRegenerateChapter: document.getElementById("btn-regenerate-chapter"),
+  btnRewrite: document.getElementById("btn-rewrite"),
+};
+
+function buildChapterCharacterGraphHtml(data, chapterIndex) {
+  const graph = (data && data.character_graph) || { nodes: [], edges: [] };
+  const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+  const edges = Array.isArray(graph.edges) ? graph.edges : [];
+
+  if (chapterIndex === null || chapterIndex === undefined) {
+    return "<p>请先在章节列表中打开一个章节</p>";
+  }
+  if (!nodes.length && !edges.length) {
+    return "<p>当前章节暂无人物关系数据</p>";
+  }
+
+  const idToName = {};
+  nodes.forEach((n) => {
+    if (n && n.id !== undefined && n.id !== null) {
+      idToName[String(n.id)] = String(n.name || n.id);
+    }
+  });
+
+  const nodeItems = nodes
+    .map((n) => {
+      const name = escapeHtml(String((n && (n.name || n.id)) || "未命名人物"));
+      const desc = escapeHtml(String((n && n.description) || ""));
+      return `<li><strong>${name}</strong>${desc ? `：${desc}` : ""}</li>`;
+    })
+    .join("");
+
+  const edgeItems = edges
+    .map((e) => {
+      const fromName = escapeHtml(String(idToName[String((e && e.from_id) || "")] || (e && e.from_id) || "未知"));
+      const toName = escapeHtml(String(idToName[String((e && e.to_id) || "")] || (e && e.to_id) || "未知"));
+      const relation = escapeHtml(String((e && e.relation) || "相关"));
+      const note = escapeHtml(String((e && e.note) || ""));
+      return `<li>${fromName} -> ${toName}（${relation}）${note ? ` [${note}]` : ""}</li>`;
+    })
+    .join("");
+
+  return `
+    <div class="graph-meta">第 ${Number(chapterIndex) + 1} 章 · 人物 ${nodes.length} · 关系 ${edges.length}</div>
+    <div class="graph-columns">
+      <div class="graph-col">
+        <h4>人物</h4>
+        <ul>${nodeItems || "<li>暂无人物</li>"}</ul>
+      </div>
+      <div class="graph-col">
+        <h4>关系</h4>
+        <ul>${edgeItems || "<li>暂无关系</li>"}</ul>
+      </div>
+    </div>
+  `;
+}
+
+async function loadChapterCharacterGraph(index) {
+  if (!state.currentProjectId) return;
+  if (index === null || index === undefined) {
+    state.currentChapterCharacterGraph = null;
+    return;
+  }
+  try {
+    const data = await api.get(
+      `/projects/${state.currentProjectId}/character-graph?chapter_index=${Number(index)}`
+    );
+    state.currentChapterCharacterGraph = data;
+    return data;
+  } catch (_) {
+    // 图谱加载失败不阻断正文阅读，面板展示兜底文案即可。
+    state.currentChapterCharacterGraph = null;
+    return null;
+  }
+}
+
+function isLatestChapterSelected() {
+  if (state.selectedChapterIndex === null) return false;
+  if (!Array.isArray(state.chapterMetas) || state.chapterMetas.length === 0) return false;
+  const latest = state.chapterMetas.reduce((max, item) => Math.max(max, Number(item.index)), -1);
+  return Number(state.selectedChapterIndex) === Number(latest);
+}
+
+function setChapterWriteButtonsDisabled(disabled) {
+  if (el.btnNextChapter) el.btnNextChapter.disabled = disabled;
+  if (el.btnRegenerateChapter) el.btnRegenerateChapter.disabled = disabled;
+  if (el.btnRewrite) el.btnRewrite.disabled = disabled;
+}
+
+function updateChapterActionButtons() {
+  const hasSelection = state.selectedChapterIndex !== null;
+  const latestSelected = isLatestChapterSelected();
+  const canModify = hasSelection && latestSelected;
+  // 仅在选中「最新章节」时显示：续写下一章、重新生成本章、提交反馈重写
+  const showWriteActions = !hasSelection || latestSelected;
+  const writeDisabled = state.isChapterWriteInProgress;
+
+  if (el.btnNextChapter) {
+    el.btnNextChapter.hidden = !showWriteActions;
+    el.btnNextChapter.disabled = writeDisabled;
+  }
+  if (el.btnRegenerateChapter) {
+    el.btnRegenerateChapter.hidden = !canModify;
+    el.btnRegenerateChapter.disabled = writeDisabled || !canModify;
+    el.btnRegenerateChapter.title = canModify ? "" : "仅支持对最新章节操作，避免后续章节逻辑断裂";
+  }
+  if (el.btnRewrite) {
+    el.btnRewrite.hidden = !canModify;
+    el.btnRewrite.disabled = writeDisabled || !canModify;
+    el.btnRewrite.title = canModify ? "" : "仅支持对最新章节操作，避免后续章节逻辑断裂";
+  }
+  if (el.btnRollbackTail) {
+    // 仅在选中非最新章节时显示（最新章节后无内容可回滚）
+    el.btnRollbackTail.hidden = !hasSelection || latestSelected;
+    el.btnRollbackTail.disabled = !hasSelection;
+    el.btnRollbackTail.title = hasSelection ? "" : "请先在章节列表中打开一个章节";
+  }
+  if (el.feedbackRewriteSection) {
+    el.feedbackRewriteSection.hidden = !canModify;
+  }
+}
+
+function setPlotIdeasSectionVisibility(visible) {
+  if (!el.plotIdeasSection) return;
+  el.plotIdeasSection.hidden = !visible;
+}
+
+function hasOutlineData(projectData) {
+  const volumes =
+    (projectData &&
+      projectData.outline_structure &&
+      Array.isArray(projectData.outline_structure.volumes) &&
+      projectData.outline_structure.volumes) ||
+    [];
+  const hasOutlineVolumes = volumes.length > 0;
+  const hasOutlineText =
+    typeof (projectData && projectData.outline) === "string" &&
+    projectData.outline.trim().length > 0;
+  const hasChapters = Array.isArray(projectData && projectData.chapters) && projectData.chapters.length > 0;
+  return hasOutlineVolumes || hasOutlineText || hasChapters;
+}
+
+function updateCreatePanelVisibility(projectData) {
+  if (!el.panelCreate) return;
+  const shouldHide = hasOutlineData(projectData);
+  el.panelCreate.hidden = shouldHide;
+  if (el.layout) {
+    el.layout.classList.toggle("is-create-hidden", shouldHide);
+  }
+}
+
+function updateDetailLayout(projectData) {
+  if (!el.panelDetail) return;
+  el.panelDetail.classList.toggle("has-outline", hasOutlineData(projectData));
+}
+
+function setDetailPanelVisibility(visible) {
+  if (!el.panelDetail) return;
+  el.panelDetail.hidden = !visible;
+  if (el.layout) {
+    el.layout.classList.toggle("is-detail-hidden", !visible);
+  }
+  if (!visible && el.chapterView) {
+    el.chapterView.style.height = "";
+  }
+}
+
+function adjustChapterViewHeight() {
+  if (!el.chapterView) return;
+  // 有大纲时由 CSS flex 控制 #chapter-view 高度，填满右侧剩余空间，不再设置固定高度
+  if (el.panelDetail && el.panelDetail.classList.contains("has-outline")) {
+    el.chapterView.style.height = "";
+    return;
+  }
+  el.chapterView.style.height = "";
+}
+
+function setStatus(msg) {
+  if (!el.status) return;
+  el.status.textContent = msg || "";
+  el.status.classList.remove("is-error", "is-working", "is-ok");
+  if (!msg) return;
+  if (msg.includes("失败") || msg.includes("错误")) {
+    el.status.classList.add("is-error");
+  } else if (
+    msg.includes("中") ||
+    msg.includes("加载") ||
+    msg.includes("生成") ||
+    msg.includes("重写")
+  ) {
+    el.status.classList.add("is-working");
+  } else {
+    el.status.classList.add("is-ok");
+  }
+}
+
+function escapeHtml(text) {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function renderMarkdown(md) {
+  // 先处理转义，再回填 markdown 语法
+  let html = escapeHtml(md || "");
+  html = html.replace(/^### (.+)$/gm, "<h3>$1</h3>");
+  html = html.replace(/^## (.+)$/gm, "<h2>$1</h2>");
+  html = html.replace(/^# (.+)$/gm, "<h1>$1</h1>");
+  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img alt="$1" src="$2" />');
+  html = html.replace(/\n\n+/g, "</p><p>");
+  return `<p>${html}</p>`;
+}
+
+function setOutlineGeneratingUI(isGenerating) {
+  state.isGeneratingOutline = Boolean(isGenerating);
+  const lockTargets = [
+    el.instruction,
+    el.btnCreateAndIdeas,
+    el.btnRefreshIdeas,
+    el.customSummary,
+    el.btnGenerateOutline,
+  ];
+  lockTargets.forEach((node) => {
+    if (node) node.disabled = state.isGeneratingOutline;
+  });
+  if (el.plotIdeas) {
+    el.plotIdeas.classList.toggle("is-disabled", state.isGeneratingOutline);
+  }
+}
+
+function renderProjectList(projectIds) {
+  state.projectIds = projectIds || [];
+  el.projectList.innerHTML = "";
+
+  if (!state.projectIds.length) {
+    const li = document.createElement("li");
+    li.className = "project-item-empty";
+    li.textContent = "暂无项目";
+    el.projectList.appendChild(li);
+    return;
+  }
+
+  for (const projectId of state.projectIds) {
+    const li = document.createElement("li");
+    li.className = "project-item";
+    const isSelected = state.currentProjectId === projectId;
+    if (isSelected) {
+      li.classList.add("expanded");
+    }
+    if (isSelected) {
+      li.classList.add("selected");
+      li.setAttribute("aria-current", "true");
+    }
+
+    const head = document.createElement("div");
+    head.className = "project-item-head";
+
+    const btn = document.createElement("button");
+    btn.className = "project-open-btn";
+    btn.textContent = `打开 ${projectId}`;
+    btn.onclick = () => openProject(projectId);
+    head.appendChild(btn);
+
+    if (isSelected) {
+      const tag = document.createElement("span");
+      tag.className = "project-selected-tag";
+      tag.textContent = "已选中";
+      head.appendChild(tag);
+    }
+    li.appendChild(head);
+
+    if (isSelected) {
+      const preview = document.createElement("div");
+      preview.className = "project-preview";
+      preview.textContent = state.projectPreviews[projectId] || "正在加载概要...";
+      li.appendChild(preview);
+    }
+
+    el.projectList.appendChild(li);
+  }
+}
+
+function buildProjectPreview(project) {
+  const summary = String((project && project.selected_plot_summary) || "").trim();
+  if (summary) {
+    return `概要：${summary.slice(0, 100)}${summary.length > 100 ? "..." : ""}`;
+  }
+  const outline = (project && project.outline_structure && project.outline_structure.volumes) || [];
+  if (outline.length > 0) {
+    const chapterTitles = [];
+    for (const volume of outline) {
+      for (const chapter of volume.chapters || []) {
+        if (chapter && chapter.title) chapterTitles.push(chapter.title);
+        if (chapterTitles.length >= 2) break;
+      }
+      if (chapterTitles.length >= 2) break;
+    }
+    if (chapterTitles.length > 0) {
+      return `概要：${chapterTitles.join("、")}`;
+    }
+    return `概要：${outline[0].volume_title || "已生成大纲"}`;
+  }
+  const instruction = String((project && project.instruction) || "").trim();
+  if (instruction) {
+    return `创作意图：${instruction}`;
+  }
+  return "暂无概要，点击后可继续生成。";
+}
+
+function parseTotalChaptersInput() {
+  if (!el.totalChapters) return null;
+  const raw = String(el.totalChapters.value || "").trim();
+  if (!raw) return null;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error("目标章节数量必须是大于 0 的整数");
+  }
+  return n;
+}
+
+async function loadProjects() {
+  setStatus("加载项目列表...");
+  try {
+    const data = await api.get("/projects");
+    const projectIds = (data.projects || []).map((item) => item.project_id);
+    if (state.currentProjectId && !projectIds.includes(state.currentProjectId)) {
+      state.currentProjectId = null;
+    }
+    if (!state.currentProjectId) {
+      updateCreatePanelVisibility(null);
+      updateDetailLayout(null);
+      setDetailPanelVisibility(false);
+    }
+    renderProjectList(projectIds);
+    setStatus("项目列表已更新");
+  } catch (e) {
+    setStatus(`加载失败：${e.message}`);
+  }
+}
+
+async function openProject(projectId) {
+  state.currentProjectId = projectId;
+  renderProjectList(state.projectIds);
+  setStatus(`打开项目 ${projectId} ...`);
+  try {
+    const p = await api.get(`/projects/${projectId}`);
+    const showDetail = hasOutlineData(p);
+    const chapters = p.chapters || [];
+    state.chapterMetas = chapters;
+    const generatedCount = chapters.length;
+    const rawCurrentIndex = Number.isFinite(p.current_chapter_index) ? Number(p.current_chapter_index) : null;
+    const resolvedCurrentIndex =
+      generatedCount > 0
+        ? rawCurrentIndex !== null && rawCurrentIndex >= 0 && rawCurrentIndex < generatedCount
+          ? rawCurrentIndex
+          : generatedCount - 1
+        : null;
+    const currentIndexOneBased = generatedCount > 0 && resolvedCurrentIndex !== null ? resolvedCurrentIndex + 1 : 0;
+    updateCreatePanelVisibility(p);
+    updateDetailLayout(p);
+    setDetailPanelVisibility(showDetail);
+    state.currentChapterIndex = resolvedCurrentIndex;
+    state.selectedChapterIndex = null;
+    updateChapterActionButtons();
+    if (el.totalChapters && Number.isFinite(p.total_chapters)) {
+      el.totalChapters.value = String(p.total_chapters);
+    }
+    state.projectPreviews[projectId] = buildProjectPreview(p);
+    renderProjectList(state.projectIds);
+    el.projectMeta.textContent = `项目：${projectId} | 目标章节：${p.total_chapters || "-"} | 已生成：${generatedCount}章 | 当前章节：${currentIndexOneBased}`;
+    renderOutline(p.outline_structure);
+    renderChapterList(chapters);
+    adjustChapterViewHeight();
+    if (generatedCount > 0 && resolvedCurrentIndex !== null) {
+      await openChapter(resolvedCurrentIndex);
+      setStatus(`已打开 ${projectId}，已定位到第 ${resolvedCurrentIndex + 1} 章`);
+    } else if (el.chapterView) {
+      el.chapterView.innerHTML = "<p>暂无章节，请先点击“续写下一章”</p>";
+      adjustChapterViewHeight();
+      setStatus(`已打开 ${projectId}，当前暂无章节`);
+    } else {
+      setStatus(`已打开 ${projectId}`);
+    }
+  } catch (e) {
+    state.currentChapterIndex = null;
+    updateCreatePanelVisibility(null);
+    updateDetailLayout(null);
+    setDetailPanelVisibility(false);
+    setStatus(`打开失败：${e.message}`);
+  }
+}
+
+async function refreshProjectsAndHideDetail() {
+  state.currentProjectId = null;
+  state.currentChapterIndex = null;
+  state.selectedChapterIndex = null;
+  state.chapterMetas = [];
+  renderProjectList(state.projectIds);
+  updateCreatePanelVisibility(null);
+  updateDetailLayout(null);
+  setDetailPanelVisibility(false);
+  await loadProjects();
+}
+
+function startNewProject() {
+  state.currentProjectId = null;
+  state.currentChapterIndex = null;
+  state.selectedChapterIndex = null;
+  state.chapterMetas = [];
+  state.plotIdeas = [];
+  state.selectedIdea = "";
+  state.expandedIdeaIndex = null;
+  renderProjectList(state.projectIds);
+  updateCreatePanelVisibility(null);
+  updateDetailLayout(null);
+  setDetailPanelVisibility(false);
+  setPlotIdeasSectionVisibility(false);
+  setStatus("请输入创作意图后，点击“创建并生成概要”");
+  if (el.instruction) el.instruction.focus();
+}
+
+function renderPlotIdeas(ideas) {
+  state.plotIdeas = ideas || [];
+  setPlotIdeasSectionVisibility(state.plotIdeas.length > 0);
+  if (
+    state.expandedIdeaIndex !== null &&
+    (state.expandedIdeaIndex < 0 || state.expandedIdeaIndex >= state.plotIdeas.length)
+  ) {
+    state.expandedIdeaIndex = null;
+  }
+  // 默认选中第一条，确保有明确可选结果
+  if (!state.selectedIdea && state.plotIdeas.length > 0) {
+    state.selectedIdea = state.plotIdeas[0];
+  }
+
+  el.plotIdeas.innerHTML = "";
+  (state.plotIdeas || []).forEach((idea, idx) => {
+    const card = document.createElement("div");
+    card.className = "card";
+    if (state.isGeneratingOutline) card.classList.add("is-disabled");
+    if (state.selectedIdea === idea) card.classList.add("selected");
+    if (state.expandedIdeaIndex === idx) card.classList.add("expanded");
+    card.innerHTML = `
+      <div class="card-head">
+        <span class="card-radio"></span>
+        <strong>候选 ${idx + 1}</strong>
+      </div>
+      <div class="card-body">${escapeHtml(idea)}</div>
+    `;
+    card.onclick = () => {
+      if (state.isGeneratingOutline) return;
+      state.expandedIdeaIndex = state.expandedIdeaIndex === idx ? null : idx;
+      state.selectedIdea = idea;
+      renderPlotIdeas(state.plotIdeas);
+    };
+    el.plotIdeas.appendChild(card);
+  });
+
+  if (!state.plotIdeas.length) {
+    el.plotIdeas.innerHTML = "";
+    el.selectedIdeaView.textContent = "当前未选择剧情概要";
+    return;
+  }
+
+  if (state.selectedIdea) {
+    el.selectedIdeaView.textContent = `当前已选：${state.selectedIdea.slice(0, 80)}${state.selectedIdea.length > 80 ? "..." : ""}`;
+  } else {
+    el.selectedIdeaView.textContent = "当前未选择剧情概要";
+  }
+}
+
+function renderOutline(outlineStructure) {
+  const volumes = (outlineStructure && outlineStructure.volumes) || [];
+  if (!volumes.length) {
+    el.outlineView.innerHTML = "<p>暂无大纲</p>";
+    return;
+  }
+  const chunks = [];
+  const activeChapterIndex =
+    state.selectedChapterIndex !== null && Number.isFinite(Number(state.selectedChapterIndex))
+      ? Number(state.selectedChapterIndex)
+      : state.currentChapterIndex !== null && Number.isFinite(Number(state.currentChapterIndex))
+        ? Number(state.currentChapterIndex)
+        : null;
+  let chapterSeq = 0;
+  volumes.forEach((v, vi) => {
+    const chaptersInVolume = (v.chapters || []).length;
+    const startChapterIdx = chapterSeq;
+    const endChapterIdx = chapterSeq + chaptersInVolume - 1;
+    const isActiveVolume =
+      activeChapterIndex !== null &&
+      chaptersInVolume > 0 &&
+      activeChapterIndex >= startChapterIdx &&
+      activeChapterIndex <= endChapterIdx;
+    const shouldOpen = isActiveVolume;
+    chunks.push(`<details${shouldOpen ? " open" : ""}><summary>${escapeHtml(v.volume_title || `卷${vi + 1}`)}</summary>`);
+    (v.chapters || []).forEach((c, ci) => {
+      const isCurrent = state.currentChapterIndex !== null && chapterSeq === state.currentChapterIndex;
+      const chapterCls = isCurrent ? "outline-chapter is-current" : "outline-chapter";
+      chunks.push(
+        `<div class="${chapterCls}" data-chapter-index="${chapterSeq}"><strong>${escapeHtml(
+          c.title || `第${ci + 1}章`
+        )}</strong></div>`
+      );
+      chunks.push("<ul>");
+      (c.points || []).forEach((p) => chunks.push(`<li>${escapeHtml(p)}</li>`));
+      chunks.push("</ul>");
+      chapterSeq += 1;
+    });
+    chunks.push("</details>");
+  });
+  el.outlineView.innerHTML = chunks.join("");
+}
+
+function scrollToOutlineChapter(index) {
+  if (!el.outlineView) return;
+  const target = el.outlineView.querySelector(`.outline-chapter[data-chapter-index="${Number(index)}"]`);
+  if (!target) return;
+
+  target.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+  target.classList.add("is-linked-focus");
+  window.setTimeout(() => {
+    target.classList.remove("is-linked-focus");
+  }, 900);
+}
+
+function renderChapterList(chapters) {
+  state.chapterMetas = Array.isArray(chapters) ? chapters : [];
+  el.chapterList.innerHTML = "";
+  chapters.forEach((c) => {
+    const li = document.createElement("li");
+    li.setAttribute("data-index", String(c.index));
+    if (Number(state.selectedChapterIndex) === Number(c.index)) {
+      li.classList.add("is-selected");
+    }
+    const btn = document.createElement("button");
+    btn.textContent = `第${c.index + 1}章：${c.title || "未命名"}（${c.word_count || 0}字）`;
+    btn.onclick = () => openChapter(c.index);
+    li.appendChild(btn);
+    el.chapterList.appendChild(li);
+  });
+  updateChapterActionButtons();
+}
+
+function highlightSelectedChapterInList(index) {
+  if (!el.chapterList) return;
+  const items = el.chapterList.querySelectorAll("li[data-index]");
+  let selectedItem = null;
+  items.forEach((li) => {
+    const liIndex = Number(li.getAttribute("data-index"));
+    const isSelected = liIndex === Number(index);
+    li.classList.toggle("is-selected", isSelected);
+    if (isSelected) selectedItem = li;
+  });
+  if (selectedItem && typeof selectedItem.scrollIntoView === "function") {
+    selectedItem.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
+  }
+}
+
+async function openChapter(index) {
+  if (!state.currentProjectId) return;
+  state.selectedChapterIndex = index;
+  updateChapterActionButtons();
+  highlightSelectedChapterInList(index);
+  scrollToOutlineChapter(index);
+  setStatus(`加载第 ${index + 1} 章...`);
+  try {
+    const data = await api.get(`/projects/${state.currentProjectId}/chapters/${index}`);
+    el.chapterView.innerHTML = renderMarkdown(data.content || "");
+    adjustChapterViewHeight();
+    setStatus(`已加载第 ${index + 1} 章`);
+  } catch (e) {
+    setStatus(`加载章节失败：${e.message}`);
+  }
+}
+
+function openChapterModal() {
+  if (!el.chapterModal || !el.chapterModalContent) return;
+  const chapterHtml = el.chapterView ? el.chapterView.innerHTML.trim() : "";
+  if (!chapterHtml) {
+    setStatus("请先在章节列表中打开一个章节");
+    return;
+  }
+  el.chapterModalContent.innerHTML = chapterHtml;
+  el.chapterModal.hidden = false;
+}
+
+function closeChapterModal() {
+  if (!el.chapterModal) return;
+  el.chapterModal.hidden = true;
+}
+
+async function openCharacterGraphModal() {
+  if (!el.characterGraphModal || !el.characterGraphModalContent) return;
+  if (!state.currentProjectId || state.selectedChapterIndex === null) {
+    setStatus("请先在章节列表中打开一个章节");
+    return;
+  }
+  const chapterIndex = Number(state.selectedChapterIndex);
+  el.characterGraphModalContent.innerHTML = "<p>人物关系加载中...</p>";
+  el.characterGraphModal.hidden = false;
+  const data = await loadChapterCharacterGraph(chapterIndex);
+  if (!data) {
+    el.characterGraphModalContent.innerHTML = "<p>人物关系加载失败</p>";
+    return;
+  }
+  el.characterGraphModalContent.innerHTML = buildChapterCharacterGraphHtml(data, chapterIndex);
+}
+
+function closeCharacterGraphModal() {
+  if (!el.characterGraphModal) return;
+  el.characterGraphModal.hidden = true;
+}
+
+async function createAndGenerateIdeas() {
+  if (!el.instruction) {
+    setStatus("错误：页面元素未加载完成，请刷新后重试");
+    return;
+  }
+  const instruction = el.instruction.value.trim();
+  if (!instruction) {
+    setStatus("请先输入创作意图");
+    return;
+  }
+  const btn = el.btnCreateAndIdeas;
+  const origText = btn ? btn.textContent : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "处理中...";
+  }
+  setStatus("创建项目并生成概要...");
+  try {
+    const totalChapters = parseTotalChaptersInput();
+    const p = await api.post("/projects", {
+      instruction,
+      ...(totalChapters ? { total_chapters: totalChapters } : {}),
+    });
+    const pid = p && p.project_id;
+    if (!pid) {
+      setStatus("操作失败：服务器未返回项目 ID");
+      return;
+    }
+    state.currentProjectId = pid;
+    state.selectedIdea = "";
+    state.expandedIdeaIndex = null;
+    const ideas = await api.post(`/projects/${state.currentProjectId}/plot-ideas`, { instruction });
+    renderPlotIdeas(ideas.plot_ideas || []);
+    await openProject(state.currentProjectId);
+    setStatus(`项目 ${state.currentProjectId} 创建成功，概要已生成`);
+  } catch (e) {
+    setStatus(`操作失败：${e.message}`);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = origText;
+    }
+  }
+}
+
+async function refreshIdeas() {
+  if (!state.currentProjectId) {
+    setStatus("请先创建或打开项目");
+    return;
+  }
+  const instruction = el.instruction.value.trim();
+  if (!instruction) {
+    setStatus("请输入创作意图后再刷新概要");
+    return;
+  }
+  setStatus("刷新概要中...");
+  try {
+    state.selectedIdea = "";
+    state.expandedIdeaIndex = null;
+    const ideas = await api.post(`/projects/${state.currentProjectId}/plot-ideas`, { instruction });
+    renderPlotIdeas(ideas.plot_ideas || []);
+    setStatus("概要已刷新");
+  } catch (e) {
+    setStatus(`刷新失败：${e.message}`);
+  }
+}
+
+async function generateOutline() {
+  if (state.isGeneratingOutline) {
+    setStatus("大纲生成中，请稍候...");
+    return;
+  }
+  if (!state.currentProjectId) {
+    setStatus("请先创建或打开项目");
+    return;
+  }
+  const custom = el.customSummary.value.trim();
+  const selected = custom || state.selectedIdea;
+  if (!selected) {
+    setStatus("请先选择一条剧情概要，或填写自定义概要");
+    return;
+  }
+  setStatus("生成大纲中...");
+  setOutlineGeneratingUI(true);
+  try {
+    const totalChapters = parseTotalChaptersInput();
+    const data = await api.post(`/projects/${state.currentProjectId}/outline`, {
+      selected_plot_summary: selected,
+      ...(totalChapters ? { total_chapters: totalChapters } : {}),
+    });
+    renderOutline(data.outline_structure);
+    await openProject(state.currentProjectId);
+    setStatus("大纲生成完成");
+  } catch (e) {
+    setStatus(`生成大纲失败：${e.message}`);
+  } finally {
+    setOutlineGeneratingUI(false);
+  }
+}
+
+async function writeNextChapter() {
+  if (!state.currentProjectId) {
+    setStatus("请先创建或打开项目");
+    return;
+  }
+  setStatus("续写下一章中...");
+  state.isChapterWriteInProgress = true;
+  updateChapterActionButtons();
+  try {
+    const data = await api.post(`/projects/${state.currentProjectId}/chapters/next`, {});
+    await openProject(state.currentProjectId);
+    await openChapter(data.chapter_index);
+    setStatus(`第 ${data.chapter_index + 1} 章已生成`);
+  } catch (e) {
+    setStatus(`续写失败：${e.message}`);
+  } finally {
+    state.isChapterWriteInProgress = false;
+    updateChapterActionButtons();
+  }
+}
+
+async function rollbackTailFromSelectedChapter() {
+  if (!state.currentProjectId) {
+    setStatus("请先创建或打开项目");
+    return;
+  }
+  if (state.selectedChapterIndex === null) {
+    setStatus("请先在章节列表中打开一个章节");
+    return;
+  }
+  const chapterNo = Number(state.selectedChapterIndex) + 1;
+  const confirmed = window.confirm(
+    `将保留第 ${chapterNo} 章及之前内容，并删除该章之后所有章节。此操作不可恢复，是否继续？`
+  );
+  if (!confirmed) return;
+
+  setStatus(`回滚到第 ${chapterNo} 章中...`);
+  try {
+    const data = await api.delete(
+      `/projects/${state.currentProjectId}/chapters/${state.selectedChapterIndex}/tail`
+    );
+    await openProject(state.currentProjectId);
+    await openChapter(Number(data.kept_until));
+    setStatus(`回滚完成：已删除 ${data.deleted_count} 章后续内容`);
+  } catch (e) {
+    setStatus(`回滚失败：${e.message}`);
+  }
+}
+
+async function rewriteChapter() {
+  if (!state.currentProjectId) {
+    setStatus("请先创建或打开项目");
+    return;
+  }
+  if (state.selectedChapterIndex === null) {
+    setStatus("请先在章节列表中打开一个章节");
+    return;
+  }
+  const feedback = el.feedback.value.trim();
+  if (!feedback) {
+    setStatus("请输入反馈内容");
+    return;
+  }
+  setStatus("重写中...");
+  state.isChapterWriteInProgress = true;
+  updateChapterActionButtons();
+  try {
+    await api.post(`/projects/${state.currentProjectId}/chapters/${state.selectedChapterIndex}/rewrite`, {
+      user_feedback: feedback,
+      update_outline: el.updateOutline.checked,
+    });
+    await openProject(state.currentProjectId);
+    await openChapter(state.selectedChapterIndex);
+    setStatus("重写完成");
+  } catch (e) {
+    setStatus(`重写失败：${e.message}`);
+  } finally {
+    state.isChapterWriteInProgress = false;
+    updateChapterActionButtons();
+  }
+}
+
+async function regenerateCurrentChapter() {
+  if (!state.currentProjectId) {
+    setStatus("请先创建或打开项目");
+    return;
+  }
+  if (state.selectedChapterIndex === null) {
+    setStatus("请先在章节列表中打开一个章节");
+    return;
+  }
+  const chapterNo = Number(state.selectedChapterIndex) + 1;
+  const confirmed = window.confirm(
+    `将基于大纲重新生成第 ${chapterNo} 章，并覆盖当前正文。是否继续？`
+  );
+  if (!confirmed) return;
+
+  setStatus(`重新生成第 ${chapterNo} 章中...`);
+  state.isChapterWriteInProgress = true;
+  updateChapterActionButtons();
+  try {
+    const data = await api.post(
+      `/projects/${state.currentProjectId}/chapters/${state.selectedChapterIndex}/regenerate`,
+      {}
+    );
+    await openProject(state.currentProjectId);
+    await openChapter(data.chapter_index);
+    setStatus(`第 ${data.chapter_index + 1} 章已重新生成`);
+  } catch (e) {
+    setStatus(`重新生成失败：${e.message}`);
+  } finally {
+    state.isChapterWriteInProgress = false;
+    updateChapterActionButtons();
+  }
+}
+
+function bindEvents() {
+  const bindClick = (node, handler) => {
+    if (!node || typeof handler !== "function") return;
+    node.addEventListener("click", (event) => {
+      event.preventDefault();
+      Promise.resolve(handler(event)).catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        setStatus(`操作失败：${msg}`);
+      });
+    });
+  };
+
+  bindClick(el.btnRefreshProjects, refreshProjectsAndHideDetail);
+  bindClick(el.btnNewProject, startNewProject);
+  bindClick(el.btnCreateAndIdeas, createAndGenerateIdeas);
+  bindClick(el.btnRefreshIdeas, refreshIdeas);
+  bindClick(el.btnGenerateOutline, generateOutline);
+  bindClick(el.btnNextChapter, writeNextChapter);
+  bindClick(el.btnRollbackTail, rollbackTailFromSelectedChapter);
+  bindClick(el.btnRegenerateChapter, regenerateCurrentChapter);
+  bindClick(el.btnRewrite, rewriteChapter);
+  bindClick(el.btnViewChapterModal, openChapterModal);
+  bindClick(el.btnViewCharacterGraphModal, openCharacterGraphModal);
+  bindClick(el.btnCloseChapterModal, closeChapterModal);
+  bindClick(el.btnCloseCharacterGraphModal, closeCharacterGraphModal);
+
+  // 防御式兜底：即使未来引入了 form，也避免默认提交触发整页刷新。
+  document.addEventListener("submit", (event) => {
+    event.preventDefault();
+  });
+
+  if (el.chapterModal) {
+    el.chapterModal.addEventListener("click", (event) => {
+      if (event.target && event.target.getAttribute("data-close") === "true") {
+        closeChapterModal();
+      }
+    });
+  }
+  if (el.characterGraphModal) {
+    el.characterGraphModal.addEventListener("click", (event) => {
+      if (event.target && event.target.getAttribute("data-close-graph") === "true") {
+        closeCharacterGraphModal();
+      }
+    });
+  }
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      closeChapterModal();
+      closeCharacterGraphModal();
+    }
+  });
+  window.addEventListener("resize", () => {
+    adjustChapterViewHeight();
+  });
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", function () {
+    setPlotIdeasSectionVisibility(false);
+    bindEvents();
+    loadProjects();
+    adjustChapterViewHeight();
+  });
+} else {
+  setPlotIdeasSectionVisibility(false);
+  bindEvents();
+  loadProjects();
+  adjustChapterViewHeight();
+}
