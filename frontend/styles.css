@@ -270,6 +270,10 @@ button:disabled:active {
   line-height: 1.5;
 }
 
+.project-preview.project-preview--truncated {
+  cursor: help;
+}
+
 .cards {
   display: flex;
   flex-direction: column;
@@ -404,6 +408,12 @@ button:disabled:active {
   line-height: 1.8;
   box-shadow: inset 0 1px 0 #f8fafc;
   scrollbar-gutter: stable;
+}
+
+.markdown pre.streaming-pre {
+  margin: 0;
+  white-space: pre-wrap;
+  font-family: inherit;
 }
 
 .markdown::-webkit-scrollbar {
@@ -732,6 +742,25 @@ button:disabled:active {
 
 #outline-view::-webkit-scrollbar-thumb:hover {
   background: rgba(79, 70, 229, 0.5);
+}
+
+.token-usage {
+  margin-top: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #334155;
+}
+
+.token-usage .token-usage-list {
+  margin: 6px 0 0;
+  padding-left: 1.2rem;
+}
+
+.token-usage code {
+  font-size: 12px;
+  background: rgba(99, 102, 241, 0.08);
+  padding: 1px 4px;
+  border-radius: 4px;
 }
 
 @media (max-width: 1200px) {

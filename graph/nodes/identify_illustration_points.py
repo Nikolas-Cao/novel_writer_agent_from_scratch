@@ -1,8 +1,12 @@
 """
 阶段 7 节点：识别章节中适合插图的位置与关键词。
 """
+import logging
 import re
+import time
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from graph.llm import create_planner_llm
 from graph.utils import extract_json_object, get_message_text, invoke_and_parse_with_retry
@@ -59,13 +63,26 @@ async def identify_illustration_points_node(
         f"{chapter_text}"
     )
     points: List[Dict[str, str]] = []
+    t0 = time.monotonic()
+    logger.info("[identify_illustration_points] llm_invoke_begin project=%s chapter_index=%s", project_id, current_idx)
     try:
         obj = await invoke_and_parse_with_retry(
             planner, prompt, extract_json_object, max_retries=3
         )
         points = list(obj.get("illustration_points", []))
+        logger.info(
+            "[identify_illustration_points] llm_invoke_done project=%s points=%s elapsed_s=%.2f",
+            project_id,
+            len(points),
+            time.monotonic() - t0,
+        )
     except Exception:
         points = _fallback_points(chapter_text)
+        logger.warning(
+            "[identify_illustration_points] fallback project=%s elapsed_s=%.2f",
+            project_id,
+            time.monotonic() - t0,
+        )
 
     if not points:
         points = _fallback_points(chapter_text, limit=1)

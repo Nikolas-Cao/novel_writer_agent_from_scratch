@@ -3,7 +3,11 @@
 1) 生成章节摘要并写入本地 RAG 索引
 2) 抽取人物与关系并合并到人物图谱
 """
+import logging
+import time
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from graph.llm import create_planner_llm
 from graph.utils import extract_json_object, get_message_text, invoke_and_parse_with_retry
@@ -51,8 +55,15 @@ async def post_chapter_node(
         "请将下面章节内容总结为 200-500 字摘要，包含关键事件与人物变化，输出纯文本。\n\n"
         f"{chapter_text}"
     )
+    t_sum = time.monotonic()
+    logger.info("[post_chapter] summary_llm_begin project=%s chapter_index=%s", project_id, current_idx)
     summary_resp = await planner.ainvoke(summary_prompt)
     chapter_summary = get_message_text(summary_resp).strip()
+    logger.info(
+        "[post_chapter] summary_llm_done project=%s elapsed_s=%.2f",
+        project_id,
+        time.monotonic() - t_sum,
+    )
     if not chapter_summary:
         chapter_summary = chapter_text[:300]
     indexer.add_chapter_summary(project_id, current_idx, chapter_summary)
@@ -65,15 +76,29 @@ async def post_chapter_node(
     )
     new_nodes: List[CharacterNode] = []
     new_edges: List[CharacterEdge] = []
+    t_ex = time.monotonic()
+    logger.info("[post_chapter] extract_graph_llm_begin project=%s chapter_index=%s", project_id, current_idx)
     try:
         obj = await invoke_and_parse_with_retry(
             planner, extract_prompt, extract_json_object, max_retries=3
         )
         new_nodes = list(obj.get("nodes", []))
         new_edges = list(obj.get("edges", []))
+        logger.info(
+            "[post_chapter] extract_graph_llm_done project=%s nodes=%s edges=%s elapsed_s=%.2f",
+            project_id,
+            len(new_nodes),
+            len(new_edges),
+            time.monotonic() - t_ex,
+        )
     except Exception:
         new_nodes = _fallback_extract_characters(chapter_text)
         new_edges = []
+        logger.warning(
+            "[post_chapter] extract_graph_fallback project=%s elapsed_s=%.2f",
+            project_id,
+            time.monotonic() - t_ex,
+        )
 
     # 为本章抽取的边打上 first_chapter，供写章时滑动窗口过滤
     for e in new_edges:

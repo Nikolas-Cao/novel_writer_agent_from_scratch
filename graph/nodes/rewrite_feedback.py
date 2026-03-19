@@ -1,7 +1,11 @@
 """
 阶段 4 节点：根据用户反馈重写当前章，并写回 ChapterStore。
 """
-from typing import Any, Dict, Optional
+import logging
+import time
+from typing import Any, Awaitable, Callable, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 from config import CHAPTER_WORD_TARGET
 from graph.llm import create_writer_llm
@@ -14,8 +18,10 @@ async def rewrite_with_feedback_node(
     state: NovelProjectState,
     llm: Optional[Any] = None,
     chapter_store: Optional[ChapterStore] = None,
+    stream_llm_output: bool = False,
+    emit_token_progress: Optional[Callable[[str, str], Awaitable[None]]] = None,
 ) -> Dict[str, Any]:
-    writer = llm or create_writer_llm()
+    writer = llm or create_writer_llm(streaming=stream_llm_output)
     store = chapter_store or ChapterStore()
 
     project_id = state.get("project_id", "").strip()
@@ -45,8 +51,25 @@ async def rewrite_with_feedback_node(
         f"用户反馈：{feedback}\n\n"
         f"当前章节：\n{chapter_text}"
     )
-    resp = await writer.ainvoke(prompt)
-    rewritten = sanitize_chapter_markdown(get_message_text(resp))
+    t0 = time.monotonic()
+    logger.info("[rewrite_with_feedback] llm_invoke_begin project=%s chapter_index=%s", project_id, current_idx)
+    if stream_llm_output and emit_token_progress is not None and hasattr(writer, "astream"):
+        full_text = ""
+        async for chunk in writer.astream(prompt):
+            delta = get_message_text(chunk)
+            if delta:
+                full_text += delta
+                await emit_token_progress("rewrite_feedback_stream", delta)
+        rewritten = sanitize_chapter_markdown(full_text)
+    else:
+        resp = await writer.ainvoke(prompt)
+        rewritten = sanitize_chapter_markdown(get_message_text(resp))
+    logger.info(
+        "[rewrite_with_feedback] llm_invoke_done project=%s chapter_index=%s elapsed_s=%.2f",
+        project_id,
+        current_idx,
+        time.monotonic() - t0,
+    )
     if not rewritten:
         rewritten = chapter_text
 

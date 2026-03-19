@@ -2,7 +2,7 @@
 状态与数据结构：NovelProjectState、OutlineStructure、ChapterMeta、CharacterGraph 等。
 与 PLAN.md 中状态设计一致，供 LangGraph 工作流使用。
 """
-from typing import TypedDict, List, Optional, Any
+from typing import TypedDict, List, Optional, Any, Dict
 
 
 # ----- 大纲结构 -----
@@ -113,3 +113,5 @@ class NovelProjectState(TypedDict, total=False):
     update_outline_on_feedback: bool
     illustration_points: List[dict]
     illustration_assets: List[dict]
+    token_usage: Optional[Dict[str, Dict[str, int]]]  # model -> { input_tokens, output_tokens }
+    created_at: Optional[int]  # Unix 秒，创建时间

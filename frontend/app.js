@@ -108,6 +108,125 @@ function ensureOk(resp) {
   return resp;
 }
 
+/** 追加 stream=1，消费 NDJSON 进度行；最后一行为 {"type":"result","body":...} */
+async function postNdjsonStream(urlPath, body, onProgress) {
+  const sep = urlPath.includes("?") ? "&" : "?";
+  const full = apiUrl(`${urlPath}${sep}stream=1`);
+  console.log("[API] POST stream", full, body);
+  const resp = await fetch(full, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  }).catch((err) => {
+    throw normalizeNetworkError(err, full);
+  });
+  if (!resp.ok) {
+    const t = await resp.text();
+    throw new Error(extractBackendErrorMessage(resp, t));
+  }
+  const ct = ((resp.headers && resp.headers.get("content-type")) || "").toLowerCase();
+  if (!ct.includes("ndjson")) {
+    return resp.json();
+  }
+  const reader = resp.body && resp.body.getReader ? resp.body.getReader() : null;
+  if (!reader) {
+    throw new Error("浏览器不支持流式读取响应");
+  }
+  const dec = new TextDecoder();
+  let buf = "";
+  let finalBody = null;
+  while (true) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    buf += dec.decode(chunk.value, { stream: true });
+    const lines = buf.split("\n");
+    buf = lines.pop() || "";
+    for (const line of lines) {
+      const s = line.trim();
+      if (!s) continue;
+      let o;
+      try {
+        o = JSON.parse(s);
+      } catch (_) {
+        continue;
+      }
+      if (o.type === "progress" && typeof onProgress === "function") {
+        onProgress(o);
+      } else if (o.type === "result") {
+        finalBody = o.body;
+      } else if (o.type === "error") {
+        throw new Error((o.detail && String(o.detail)) || "请求失败");
+      }
+    }
+  }
+  if (finalBody === null) {
+    throw new Error("流式响应未返回结果");
+  }
+  return finalBody;
+}
+
+function applyProgressToStatus(evt) {
+  const msg = (evt && evt.message) || "";
+  if (msg) {
+    setStatus(msg);
+    return;
+  }
+  const stage = (evt && evt.stage) || "";
+  if (stage) {
+    setStatus(`处理中：${stage}`);
+  }
+}
+
+/**
+ * 章节流式正文（refine / rewrite）进度回调。
+ * 说明：NDJSON 可能在单次 read 内被同步解析多行，若用时间节流会漏掉尾部；后续 pipeline 阶段不再推送流式 delta，
+ * 必须在收到非流式 progress 时 flush，且在 postNdjsonStream 返回后 flushNow，避免 rAF 晚于 openChapter。
+ */
+function createChapterStreamProgressHandler(streamStage) {
+  let streamBuffer = "";
+  let rafId = null;
+
+  function paint() {
+    if (el.chapterView) {
+      el.chapterView.innerHTML = `<pre class="streaming-pre">${escapeHtml(streamBuffer)}</pre>`;
+    }
+  }
+
+  function flushNow() {
+    if (rafId != null && typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    paint();
+  }
+
+  function schedulePaint() {
+    if (rafId != null) return;
+    if (typeof requestAnimationFrame !== "function") {
+      paint();
+      return;
+    }
+    rafId = requestAnimationFrame(() => {
+      rafId = null;
+      paint();
+    });
+  }
+
+  function onProgress(evt) {
+    const stage = evt && evt.stage ? String(evt.stage) : "";
+    const delta = evt && evt.message ? String(evt.message) : "";
+    if (stage === streamStage && delta) {
+      streamBuffer += delta;
+      schedulePaint();
+      return;
+    }
+    flushNow();
+    applyProgressToStatus(evt);
+  }
+
+  return { onProgress, flushNow };
+}
+
 function extractBackendErrorMessage(resp, rawText) {
   const text = String(rawText || "").trim();
   if (!text) return `HTTP ${resp.status}`;
@@ -132,6 +251,8 @@ function extractBackendErrorMessage(resp, rawText) {
 const state = {
   currentProjectId: null,
   projectIds: [],
+  /** @type {Record<string, number>} */
+  projectCreatedAt: {},
   projectPreviews: {},
   plotIdeas: [],
   selectedIdea: "",
@@ -157,6 +278,7 @@ const el = {
   totalChapters: document.getElementById("total-chapters-input"),
   selectedIdeaView: document.getElementById("selected-idea-view"),
   projectMeta: document.getElementById("project-meta"),
+  tokenUsage: document.getElementById("token-usage"),
   outlineView: document.getElementById("outline-view"),
   chapterList: document.getElementById("chapter-list"),
   chapterView: document.getElementById("chapter-view"),
@@ -173,8 +295,7 @@ const el = {
   updateOutline: document.getElementById("update-outline-checkbox"),
   btnRefreshProjects: document.getElementById("btn-refresh-projects"),
   btnNewProject: document.getElementById("btn-new-project"),
-  btnCreateAndIdeas: document.getElementById("btn-create-and-ideas"),
-  btnRefreshIdeas: document.getElementById("btn-refresh-ideas"),
+  btnGenerateIdeas: document.getElementById("btn-generate-ideas"),
   btnGenerateOutline: document.getElementById("btn-generate-outline"),
   btnNextChapter: document.getElementById("btn-next-chapter"),
   btnRollbackTail: document.getElementById("btn-rollback-tail"),
@@ -380,6 +501,40 @@ function escapeHtml(text) {
     .replaceAll(">", "&gt;");
 }
 
+function formatCreatedAt(ts) {
+  const n = Number(ts);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  const d = new Date(n * 1000);
+  const pad = (x) => String(x).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function formatTokenCount(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return "0";
+  return x.toLocaleString("zh-CN");
+}
+
+function renderTokenUsage(project) {
+  if (!el.tokenUsage) return;
+  const raw = project && project.token_usage;
+  const usage = raw && typeof raw === "object" ? raw : {};
+  const keys = Object.keys(usage);
+  if (!keys.length) {
+    el.tokenUsage.innerHTML = "<strong>Token 用量</strong>：暂无累计（完成一次需 LLM 的操作后显示）";
+    return;
+  }
+  const rows = keys
+    .map((model) => {
+      const u = usage[model] || {};
+      const inp = formatTokenCount(u.input_tokens);
+      const out = formatTokenCount(u.output_tokens);
+      return `<li><code>${escapeHtml(String(model))}</code>：输入 ${inp} / 输出 ${out}</li>`;
+    })
+    .join("");
+  el.tokenUsage.innerHTML = `<strong>Token 用量</strong><ul class="token-usage-list">${rows}</ul>`;
+}
+
 function renderMarkdown(md) {
   // 先处理转义，再回填 markdown 语法
   let html = escapeHtml(md || "");
@@ -396,8 +551,7 @@ function setOutlineGeneratingUI(isGenerating) {
   state.isGeneratingOutline = Boolean(isGenerating);
   const lockTargets = [
     el.instruction,
-    el.btnCreateAndIdeas,
-    el.btnRefreshIdeas,
+    el.btnGenerateIdeas,
     el.customSummary,
     el.btnGenerateOutline,
   ];
@@ -438,7 +592,9 @@ function renderProjectList(projectIds) {
 
     const btn = document.createElement("button");
     btn.className = "project-open-btn";
-    btn.textContent = `打开 ${projectId}`;
+    const ts = state.projectCreatedAt[projectId];
+    const timeLabel = formatCreatedAt(ts);
+    btn.textContent = timeLabel ? `打开 ${projectId}（${timeLabel}）` : `打开 ${projectId}`;
     btn.onclick = () => openProject(projectId);
     head.appendChild(btn);
 
@@ -453,7 +609,26 @@ function renderProjectList(projectIds) {
     if (isSelected) {
       const preview = document.createElement("div");
       preview.className = "project-preview";
-      preview.textContent = state.projectPreviews[projectId] || "正在加载概要...";
+      const pv = state.projectPreviews[projectId];
+      let displayText = "正在加载概要...";
+      let fullText = "";
+      if (pv != null && pv !== "") {
+        if (typeof pv === "string") {
+          displayText = pv;
+          fullText = pv;
+        } else {
+          displayText = pv.display || "正在加载概要...";
+          fullText = pv.full != null && pv.full !== "" ? pv.full : displayText;
+        }
+      }
+      preview.textContent = displayText;
+      if (fullText && fullText !== displayText) {
+        preview.setAttribute("title", fullText);
+        preview.classList.add("project-preview--truncated");
+      } else {
+        preview.removeAttribute("title");
+        preview.classList.remove("project-preview--truncated");
+      }
       li.appendChild(preview);
     }
 
@@ -464,7 +639,10 @@ function renderProjectList(projectIds) {
 function buildProjectPreview(project) {
   const summary = String((project && project.selected_plot_summary) || "").trim();
   if (summary) {
-    return `概要：${summary.slice(0, 100)}${summary.length > 100 ? "..." : ""}`;
+    const full = `概要：${summary}`;
+    const display =
+      summary.length > 100 ? `概要：${summary.slice(0, 100)}...` : full;
+    return { display, full };
   }
   const outline = (project && project.outline_structure && project.outline_structure.volumes) || [];
   if (outline.length > 0) {
@@ -476,16 +654,21 @@ function buildProjectPreview(project) {
       }
       if (chapterTitles.length >= 2) break;
     }
+    let text;
     if (chapterTitles.length > 0) {
-      return `概要：${chapterTitles.join("、")}`;
+      text = `概要：${chapterTitles.join("、")}`;
+    } else {
+      text = `概要：${outline[0].volume_title || "已生成大纲"}`;
     }
-    return `概要：${outline[0].volume_title || "已生成大纲"}`;
+    return { display: text, full: text };
   }
   const instruction = String((project && project.instruction) || "").trim();
   if (instruction) {
-    return `创作意图：${instruction}`;
+    const text = `创作意图：${instruction}`;
+    return { display: text, full: text };
   }
-  return "暂无概要，点击后可继续生成。";
+  const fallback = "暂无概要，点击后可继续生成。";
+  return { display: fallback, full: fallback };
 }
 
 function parseTotalChaptersInput() {
@@ -503,7 +686,15 @@ async function loadProjects() {
   setStatus("加载项目列表...");
   try {
     const data = await api.get("/projects");
-    const projectIds = (data.projects || []).map((item) => item.project_id);
+    const projects = data.projects || [];
+    const nextCreated = { ...state.projectCreatedAt };
+    for (const item of projects) {
+      const pid = item && item.project_id;
+      if (!pid) continue;
+      if (item.created_at != null) nextCreated[pid] = Number(item.created_at);
+    }
+    state.projectCreatedAt = nextCreated;
+    const projectIds = projects.map((item) => item.project_id).filter(Boolean);
     if (state.currentProjectId && !projectIds.includes(state.currentProjectId)) {
       state.currentProjectId = null;
     }
@@ -521,6 +712,9 @@ async function loadProjects() {
 
 async function openProject(projectId) {
   state.currentProjectId = projectId;
+  // 切换项目/重新打开项目时，避免遗留上一项目的反馈输入与勾选状态。
+  if (el.feedback) el.feedback.value = "";
+  if (el.updateOutline) el.updateOutline.checked = false;
   renderProjectList(state.projectIds);
   setStatus(`打开项目 ${projectId} ...`);
   try {
@@ -547,8 +741,10 @@ async function openProject(projectId) {
       el.totalChapters.value = String(p.total_chapters);
     }
     state.projectPreviews[projectId] = buildProjectPreview(p);
+    if (p.created_at != null) state.projectCreatedAt[projectId] = Number(p.created_at);
     renderProjectList(state.projectIds);
     el.projectMeta.textContent = `项目：${projectId} | 目标章节：${p.total_chapters || "-"} | 已生成：${generatedCount}章 | 当前章节：${currentIndexOneBased}`;
+    renderTokenUsage(p);
     renderOutline(p.outline_structure);
     renderChapterList(chapters);
     adjustChapterViewHeight();
@@ -564,6 +760,7 @@ async function openProject(projectId) {
     }
   } catch (e) {
     state.currentChapterIndex = null;
+    if (el.tokenUsage) el.tokenUsage.innerHTML = "";
     updateCreatePanelVisibility(null);
     updateDetailLayout(null);
     setDetailPanelVisibility(false);
@@ -596,7 +793,7 @@ function startNewProject() {
   updateDetailLayout(null);
   setDetailPanelVisibility(false);
   setPlotIdeasSectionVisibility(false);
-  setStatus("请输入创作意图后，点击“创建并生成概要”");
+  setStatus("请输入创作意图后，点击「生成概要」（或先「新建项目」再生成）");
   if (el.instruction) el.instruction.focus();
 }
 
@@ -793,7 +990,11 @@ function closeCharacterGraphModal() {
   el.characterGraphModal.hidden = true;
 }
 
-async function createAndGenerateIdeas() {
+/**
+ * 生成/刷新剧情概要：已有当前项目时复用该项目，仅调用 plot-ideas；无项目时才 POST /projects 创建。
+ * 结束后刷新列表与预览（loadProjects + openProject）。
+ */
+async function generateIdeas() {
   if (!el.instruction) {
     setStatus("错误：页面元素未加载完成，请刷新后重试");
     return;
@@ -803,31 +1004,42 @@ async function createAndGenerateIdeas() {
     setStatus("请先输入创作意图");
     return;
   }
-  const btn = el.btnCreateAndIdeas;
+  const btn = el.btnGenerateIdeas;
   const origText = btn ? btn.textContent : "";
   if (btn) {
     btn.disabled = true;
     btn.textContent = "处理中...";
   }
-  setStatus("创建项目并生成概要...");
+  if (el.btnGenerateOutline) {
+    el.btnGenerateOutline.disabled = true;
+  }
   try {
-    const totalChapters = parseTotalChaptersInput();
-    const p = await api.post("/projects", {
-      instruction,
-      ...(totalChapters ? { total_chapters: totalChapters } : {}),
-    });
-    const pid = p && p.project_id;
-    if (!pid) {
-      setStatus("操作失败：服务器未返回项目 ID");
-      return;
+    if (!state.currentProjectId) {
+      setStatus("创建项目...");
+      const totalChapters = parseTotalChaptersInput();
+      const p = await api.post("/projects", {
+        instruction,
+        ...(totalChapters ? { total_chapters: totalChapters } : {}),
+      });
+      const pid = p && p.project_id;
+      if (!pid) {
+        setStatus("操作失败：服务器未返回项目 ID");
+        return;
+      }
+      state.currentProjectId = pid;
     }
-    state.currentProjectId = pid;
     state.selectedIdea = "";
     state.expandedIdeaIndex = null;
-    const ideas = await api.post(`/projects/${state.currentProjectId}/plot-ideas`, { instruction });
+    setStatus("生成概要中...");
+    const ideas = await postNdjsonStream(
+      `/projects/${state.currentProjectId}/plot-ideas`,
+      { instruction },
+      applyProgressToStatus
+    );
     renderPlotIdeas(ideas.plot_ideas || []);
+    await loadProjects();
     await openProject(state.currentProjectId);
-    setStatus(`项目 ${state.currentProjectId} 创建成功，概要已生成`);
+    setStatus(`概要已生成（项目 ${state.currentProjectId}）`);
   } catch (e) {
     setStatus(`操作失败：${e.message}`);
   } finally {
@@ -835,28 +1047,9 @@ async function createAndGenerateIdeas() {
       btn.disabled = false;
       btn.textContent = origText;
     }
-  }
-}
-
-async function refreshIdeas() {
-  if (!state.currentProjectId) {
-    setStatus("请先创建或打开项目");
-    return;
-  }
-  const instruction = el.instruction.value.trim();
-  if (!instruction) {
-    setStatus("请输入创作意图后再刷新概要");
-    return;
-  }
-  setStatus("刷新概要中...");
-  try {
-    state.selectedIdea = "";
-    state.expandedIdeaIndex = null;
-    const ideas = await api.post(`/projects/${state.currentProjectId}/plot-ideas`, { instruction });
-    renderPlotIdeas(ideas.plot_ideas || []);
-    setStatus("概要已刷新");
-  } catch (e) {
-    setStatus(`刷新失败：${e.message}`);
+    if (el.btnGenerateOutline) {
+      el.btnGenerateOutline.disabled = state.isGeneratingOutline;
+    }
   }
 }
 
@@ -879,10 +1072,14 @@ async function generateOutline() {
   setOutlineGeneratingUI(true);
   try {
     const totalChapters = parseTotalChaptersInput();
-    const data = await api.post(`/projects/${state.currentProjectId}/outline`, {
-      selected_plot_summary: selected,
-      ...(totalChapters ? { total_chapters: totalChapters } : {}),
-    });
+    const data = await postNdjsonStream(
+      `/projects/${state.currentProjectId}/outline`,
+      {
+        selected_plot_summary: selected,
+        ...(totalChapters ? { total_chapters: totalChapters } : {}),
+      },
+      applyProgressToStatus
+    );
     renderOutline(data.outline_structure);
     await openProject(state.currentProjectId);
     setStatus("大纲生成完成");
@@ -902,7 +1099,16 @@ async function writeNextChapter() {
   state.isChapterWriteInProgress = true;
   updateChapterActionButtons();
   try {
-    const data = await api.post(`/projects/${state.currentProjectId}/chapters/next`, {});
+    const { onProgress, flushNow } = createChapterStreamProgressHandler("refine_chapter_stream");
+    if (el.chapterView) {
+      el.chapterView.innerHTML = `<pre class="streaming-pre"></pre>`;
+    }
+    const data = await postNdjsonStream(
+      `/projects/${state.currentProjectId}/chapters/next`,
+      {},
+      onProgress
+    );
+    flushNow();
     await openProject(state.currentProjectId);
     await openChapter(data.chapter_index);
     setStatus(`第 ${data.chapter_index + 1} 章已生成`);
@@ -960,10 +1166,19 @@ async function rewriteChapter() {
   state.isChapterWriteInProgress = true;
   updateChapterActionButtons();
   try {
-    await api.post(`/projects/${state.currentProjectId}/chapters/${state.selectedChapterIndex}/rewrite`, {
-      user_feedback: feedback,
-      update_outline: el.updateOutline.checked,
-    });
+    const { onProgress, flushNow } = createChapterStreamProgressHandler("rewrite_feedback_stream");
+    if (el.chapterView) {
+      el.chapterView.innerHTML = `<pre class="streaming-pre"></pre>`;
+    }
+    await postNdjsonStream(
+      `/projects/${state.currentProjectId}/chapters/${state.selectedChapterIndex}/rewrite`,
+      {
+        user_feedback: feedback,
+        update_outline: el.updateOutline.checked,
+      },
+      onProgress
+    );
+    flushNow();
     await openProject(state.currentProjectId);
     await openChapter(state.selectedChapterIndex);
     setStatus("重写完成");
@@ -994,10 +1209,16 @@ async function regenerateCurrentChapter() {
   state.isChapterWriteInProgress = true;
   updateChapterActionButtons();
   try {
-    const data = await api.post(
+    const { onProgress, flushNow } = createChapterStreamProgressHandler("refine_chapter_stream");
+    if (el.chapterView) {
+      el.chapterView.innerHTML = `<pre class="streaming-pre"></pre>`;
+    }
+    const data = await postNdjsonStream(
       `/projects/${state.currentProjectId}/chapters/${state.selectedChapterIndex}/regenerate`,
-      {}
+      {},
+      onProgress
     );
+    flushNow();
     await openProject(state.currentProjectId);
     await openChapter(data.chapter_index);
     setStatus(`第 ${data.chapter_index + 1} 章已重新生成`);
@@ -1023,8 +1244,7 @@ function bindEvents() {
 
   bindClick(el.btnRefreshProjects, refreshProjectsAndHideDetail);
   bindClick(el.btnNewProject, startNewProject);
-  bindClick(el.btnCreateAndIdeas, createAndGenerateIdeas);
-  bindClick(el.btnRefreshIdeas, refreshIdeas);
+  bindClick(el.btnGenerateIdeas, generateIdeas);
   bindClick(el.btnGenerateOutline, generateOutline);
   bindClick(el.btnNextChapter, writeNextChapter);
   bindClick(el.btnRollbackTail, rollbackTailFromSelectedChapter);

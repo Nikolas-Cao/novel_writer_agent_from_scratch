@@ -1,7 +1,11 @@
 """
 阶段 2 节点：润色当前章并写回 ChapterStore（保持 Markdown）。
 """
-from typing import Any, Dict, Optional
+import logging
+import time
+from typing import Any, Awaitable, Callable, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 from graph.llm import create_writer_llm
 from graph.utils import get_message_text, sanitize_chapter_markdown
@@ -13,8 +17,10 @@ async def refine_chapter_node(
     state: NovelProjectState,
     llm: Optional[Any] = None,
     chapter_store: Optional[ChapterStore] = None,
+    stream_llm_output: bool = False,
+    emit_token_progress: Optional[Callable[[str, str], Awaitable[None]]] = None,
 ) -> Dict[str, Any]:
-    writer = llm or create_writer_llm()
+    writer = llm or create_writer_llm(streaming=stream_llm_output)
     store = chapter_store or ChapterStore()
 
     project_id = state.get("project_id", "").strip()
@@ -41,8 +47,25 @@ async def refine_chapter_node(
         "5) 禁止输出 Markdown 代码围栏（不要出现 ```markdown 或 ```）。\n\n"
         f"{draft}"
     )
-    resp = await writer.ainvoke(prompt)
-    final_text = sanitize_chapter_markdown(get_message_text(resp))
+    t0 = time.monotonic()
+    logger.info("[refine_chapter] llm_invoke_begin project=%s chapter_index=%s", project_id, current_idx)
+    if stream_llm_output and emit_token_progress is not None and hasattr(writer, "astream"):
+        full_text = ""
+        async for chunk in writer.astream(prompt):
+            delta = get_message_text(chunk)
+            if delta:
+                full_text += delta
+                await emit_token_progress("refine_chapter_stream", delta)
+        final_text = sanitize_chapter_markdown(full_text)
+    else:
+        resp = await writer.ainvoke(prompt)
+        final_text = sanitize_chapter_markdown(get_message_text(resp))
+    logger.info(
+        "[refine_chapter] llm_invoke_done project=%s chapter_index=%s elapsed_s=%.2f",
+        project_id,
+        current_idx,
+        time.monotonic() - t0,
+    )
     if not final_text:
         final_text = draft
 

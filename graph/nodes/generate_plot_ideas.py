@@ -1,7 +1,11 @@
 """
 阶段 2 节点：根据 instruction 生成剧情概要候选。
 """
+import logging
+import time
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from config import PLOT_IDEAS_COUNT
 from graph.llm import create_planner_llm
@@ -32,12 +36,16 @@ async def generate_plot_ideas_node(
     )
     ideas: List[str] = []
     text = ""
+    pid = (state.get("project_id") or "").strip() or "(no_project)"
+    t0 = time.monotonic()
+    logger.info("[generate_plot_ideas] llm_invoke_begin project=%s", pid)
     try:
         obj = await invoke_and_parse_with_retry(
             planner, prompt, extract_json_object, max_retries=3
         )
         ideas = normalize_plot_ideas(obj)
     except Exception:
+        logger.info("[generate_plot_ideas] json_parse_fallback project=%s", pid)
         resp = await planner.ainvoke(prompt)
         text = get_message_text(resp)
         ideas = normalize_plot_ideas(text)
@@ -45,6 +53,12 @@ async def generate_plot_ideas_node(
     if not ideas and text.strip():
         ideas = [text.strip()]
 
+    logger.info(
+        "[generate_plot_ideas] done project=%s count=%s elapsed_s=%.2f",
+        pid,
+        len(ideas),
+        time.monotonic() - t0,
+    )
     return {"plot_ideas": ideas}
 
 

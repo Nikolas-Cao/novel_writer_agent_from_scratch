@@ -1,8 +1,12 @@
 """
 阶段 4 节点：根据反馈与重写结果更新大纲（当前章 + 可选后续章节）。
 """
+import logging
+import time
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+logger = logging.getLogger(__name__)
 
 from graph.llm import create_planner_llm
 from graph.utils import extract_json_object, invoke_and_parse_with_retry
@@ -52,8 +56,21 @@ async def update_outline_from_feedback_node(
         f"用户反馈：{feedback}\n"
         f"重写后章节：\n{rewritten}"
     )
+    pid = (state.get("project_id") or "").strip() or "(no_project)"
+    t0 = time.monotonic()
+    logger.info(
+        "[update_outline_from_feedback] llm_invoke_begin project=%s chapter_index=%s",
+        pid,
+        current_idx,
+    )
     data = await invoke_and_parse_with_retry(
         planner, prompt, extract_json_object, max_retries=3
+    )
+    logger.info(
+        "[update_outline_from_feedback] llm_invoke_done project=%s chapter_index=%s elapsed_s=%.2f",
+        pid,
+        current_idx,
+        time.monotonic() - t0,
     )
 
     current_points: List[str] = list(data.get("current_chapter_points", []))
@@ -77,6 +94,11 @@ async def update_outline_from_feedback_node(
 
     project_id = (state.get("project_id") or "").strip()
     if project_id and rag_indexer is not None and affected_chapters:
+        logger.info(
+            "[update_outline_from_feedback] rag_upsert project=%s chapters=%s",
+            project_id,
+            sorted(affected_chapters),
+        )
         rag_indexer.upsert_outline_chunks_for_chapters(
             project_id=project_id,
             outline_structure=outline_structure,

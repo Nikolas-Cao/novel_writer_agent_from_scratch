@@ -2,8 +2,11 @@
 图节点通用工具：JSON 提取、文本清洗与 LLM 输出解析重试。
 """
 import json
+import logging
 import re
 from typing import Any, Callable, Dict, List, Optional, TypeVar
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
@@ -31,6 +34,12 @@ async def invoke_and_parse_with_retry(
             return parse_fn(text)
         except Exception as e:
             last_error = e
+            logger.warning(
+                "invoke_and_parse_with_retry: attempt %s/%s failed: %s",
+                attempt + 1,
+                max_retries,
+                e,
+            )
             if attempt == max_retries - 1:
                 raise
     if last_error is not None:

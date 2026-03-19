@@ -11,7 +11,8 @@ test.describe("Novel Writer Agent UI smoke", () => {
 
     await expect(page.locator("#btn-refresh-projects")).toBeVisible();
     await expect(page.locator("#btn-new-project")).toBeVisible();
-    await expect(page.locator("#btn-create-and-ideas")).toBeVisible();
+    await expect(page.locator("#btn-generate-ideas")).toBeVisible();
+    await expect(page.getByRole("button", { name: "生成概要" })).toBeVisible();
     await expect(page.locator("#btn-generate-outline")).toBeVisible();
 
     await expect(page.locator("#project-list")).toBeVisible();

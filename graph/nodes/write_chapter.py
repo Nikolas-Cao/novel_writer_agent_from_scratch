@@ -2,8 +2,12 @@
 阶段 3 节点：按大纲写当前章（Markdown），并写入 ChapterStore。
 接入 RAG 检索结果与人物图谱摘要。
 """
+import logging
+import time
 import uuid
 from typing import Any, Dict, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 from config import (
     CHAPTER_WORD_TARGET,
@@ -128,8 +132,22 @@ async def write_chapter_node(
         f"当前章大纲补充（RAG）：\n{outline_chunk or '（无）'}\n\n"
         f"相关人物与关系摘要：\n{character_summary}"
     )
+    t0 = time.monotonic()
+    logger.info(
+        "[write_chapter] llm_invoke_begin project=%s chapter_index=%s title=%s",
+        project_id,
+        current_idx,
+        title[:40] if title else "",
+    )
     resp = await writer.ainvoke(prompt)
     draft = sanitize_chapter_markdown(get_message_text(resp))
+    logger.info(
+        "[write_chapter] llm_invoke_done project=%s chapter_index=%s chars=%s elapsed_s=%.2f",
+        project_id,
+        current_idx,
+        len(draft),
+        time.monotonic() - t0,
+    )
 
     ref = store.save(project_id, current_idx, draft)
     word_count = len(draft.replace("\n", ""))

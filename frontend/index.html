@@ -30,8 +30,7 @@
       <label>创作意图</label>
       <textarea id="instruction-input" rows="4" placeholder="例如：都市悬疑，雨夜失踪案"></textarea>
       <div class="row">
-        <button type="button" id="btn-create-and-ideas">创建并生成概要</button>
-        <button type="button" id="btn-refresh-ideas">刷新概要</button>
+        <button type="button" id="btn-generate-ideas">生成概要</button>
       </div>
       <div id="plot-ideas-section" hidden>
         <label>剧情概要候选（请选择一条）</label>
@@ -59,6 +58,7 @@
       <div class="detail-grid">
         <div class="detail-col detail-col-left">
           <div id="project-meta" class="meta"></div>
+          <div id="token-usage" class="meta token-usage" aria-live="polite"></div>
 
           <h3>大纲</h3>
           <div id="outline-view"></div>

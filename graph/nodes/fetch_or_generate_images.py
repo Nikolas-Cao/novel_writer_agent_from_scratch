@@ -1,8 +1,11 @@
 """
 阶段 7 节点：根据插图点，先搜索后生图，返回本地图片路径。
 """
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from config import PROJECTS_ROOT
 from illustration import generate_image, search_image
@@ -25,6 +28,12 @@ async def fetch_or_generate_images_node(
     override_root = state.get("projects_root_override")
     root = Path(project_root or override_root or PROJECTS_ROOT)
     assets: List[Dict[str, Any]] = []
+    logger.info(
+        "[fetch_or_generate_images] start project=%s chapter_index=%s points=%s",
+        project_id,
+        current_idx,
+        len(points),
+    )
     for i, p in enumerate(points, 1):
         query = str(p.get("image_query") or "小说插图")
         local_path = search_image(query)
@@ -49,4 +58,10 @@ async def fetch_or_generate_images_node(
             }
         )
 
+    logger.info(
+        "[fetch_or_generate_images] done project=%s chapter_index=%s assets=%s",
+        project_id,
+        current_idx,
+        len(assets),
+    )
     return {"illustration_assets": assets}

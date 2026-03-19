@@ -2,7 +2,11 @@
 阶段 2 节点：根据 selected_plot_summary 生成结构化大纲。
 若传入 rag_indexer 且 state 有 project_id，会将每章大纲片段写入 RAG，供 write_chapter 检索。
 """
+import logging
+import time
 from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 from graph.llm import create_planner_llm
 from graph.utils import extract_json_object, invoke_and_parse_with_retry
@@ -32,16 +36,30 @@ async def plan_outline_node(
         f"目标章节数：{total_chapters}\n"
         f"剧情概要：{selected_plot_summary}"
     )
+    project_id = (state.get("project_id") or "").strip() or "(no_project)"
+    t0 = time.monotonic()
+    logger.info(
+        "[plan_outline] llm_invoke_begin project=%s target_chapters=%s",
+        project_id,
+        total_chapters,
+    )
     obj = await invoke_and_parse_with_retry(
         planner, prompt, extract_json_object, max_retries=3
     )
     outline_structure = {"volumes": obj.get("volumes", [])}
 
     # 若有 project_id 与 rag_indexer，将每章大纲片段写入 RAG，供 write_chapter 的 retriever 使用
-    project_id = (state.get("project_id") or "").strip()
-    if project_id and rag_indexer is not None and outline_structure.get("volumes"):
+    if project_id and project_id != "(no_project)" and rag_indexer is not None and outline_structure.get("volumes"):
+        logger.info("[plan_outline] rag_index_outline_chunks project=%s", project_id)
         _index_outline_chunks(rag_indexer, project_id, outline_structure)
 
+    n_vol = len(outline_structure.get("volumes") or [])
+    logger.info(
+        "[plan_outline] done project=%s volumes=%s elapsed_s=%.2f",
+        project_id,
+        n_vol,
+        time.monotonic() - t0,
+    )
     return {
         "outline_structure": outline_structure,
         "outline": outline_structure_to_string(outline_structure),

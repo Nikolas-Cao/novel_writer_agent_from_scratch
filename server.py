@@ -3,24 +3,26 @@
 提供项目、剧情概要、大纲、章节续写、反馈重写等接口。
 """
 import argparse
+import asyncio
+import json
 import logging
 import shutil
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openai import APIConnectionError as OpenAIAPIConnectionError
 from openai import APITimeoutError as OpenAIAPITimeoutError
 from pydantic import BaseModel, Field
 
 from config import CHAPTER_WORD_TARGET, CHECKPOINT_DIR, DEFAULT_TOTAL_CHAPTERS, PROJECTS_ROOT, VECTOR_STORE_DIR
-from graph.llm import create_planner_llm, create_writer_llm
+from graph.llm import TokenTrackingLLM, create_planner_llm, create_writer_llm
 from graph.nodes.generate_plot_ideas import generate_plot_ideas_node
 from graph.nodes.fetch_or_generate_images import fetch_or_generate_images_node
 from graph.nodes.identify_illustration_points import identify_illustration_points_node
@@ -36,6 +38,54 @@ from rag import LocalRagIndexer, LocalRagRetriever
 from storage import ChapterStore, CharacterGraphStore
 
 logger = logging.getLogger(__name__)
+
+NDJSON_MEDIA = "application/x-ndjson"
+ProgressFn = Callable[[str, str], Awaitable[None]]
+
+
+async def _noop_progress(_stage: str, _msg: str = "") -> None:
+    return None
+
+
+async def ndjson_with_progress(run: Callable[[ProgressFn], Awaitable[Any]]) -> AsyncIterator[bytes]:
+    """执行 run(emit)，将进度与最终结果打成 NDJSON 行（供 ?stream=1）。"""
+
+    q: asyncio.Queue = asyncio.Queue(maxsize=128)
+
+    async def emit(stage: str, message: str = "") -> None:
+        await q.put(("p", {"type": "progress", "stage": stage, "message": message}))
+
+    async def worker() -> None:
+        try:
+            body = await run(emit)
+            await q.put(("ok", body))
+        except HTTPException as exc:
+            detail = exc.detail
+            msg = detail if isinstance(detail, str) else str(detail)
+            await q.put(("http_err", (exc.status_code, msg)))
+        except Exception as exc:
+            await q.put(("err", str(exc)))
+
+    task = asyncio.create_task(worker())
+    try:
+        while True:
+            kind, payload = await q.get()
+            if kind == "p":
+                yield (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+            elif kind == "ok":
+                yield (json.dumps({"type": "result", "body": payload}, ensure_ascii=False) + "\n").encode("utf-8")
+                break
+            elif kind == "http_err":
+                status_code, msg = payload
+                yield (
+                    json.dumps({"type": "error", "detail": msg, "status": status_code}, ensure_ascii=False) + "\n"
+                ).encode("utf-8")
+                break
+            elif kind == "err":
+                yield (json.dumps({"type": "error", "detail": payload}, ensure_ascii=False) + "\n").encode("utf-8")
+                break
+    finally:
+        await task
 
 
 class CreateProjectRequest(BaseModel):
@@ -90,7 +140,11 @@ def _default_state(project_id: str) -> Dict[str, Any]:
         "chapter_output_format": "markdown",
         "enable_chapter_illustrations": False,
         "update_outline_on_feedback": False,
-        "created_at": int(time.time()),
+        # created_at 由持久化 state 文件提供；当 state 文件不存在时，
+        # cleanup_empty_projects() 应回退到 projects_dir/{project_id} 的目录 mtime。
+        # 因此这里用 0 表示“未持久化创建时间”。
+        "created_at": 0,
+        "token_usage": {},
     }
 
 
@@ -139,6 +193,8 @@ def create_app(
 
     planner = planner_llm or create_planner_llm()
     writer = writer_llm or create_writer_llm()
+    # 仅用于 refine/rewrite 阶段 token 级流式；write/outline 等保持原有 `ainvoke()` 行为。
+    writer_streaming = writer_llm or create_writer_llm(streaming=True)
 
     chapter_store = ChapterStore(root=projects_dir)
     graph_store = CharacterGraphStore(root=projects_dir)
@@ -156,6 +212,8 @@ def create_app(
         data = checkpointer.load_state(project_id) or _default_state(project_id)
         if "project_id" not in data:
             data["project_id"] = project_id
+        if "token_usage" not in data:
+            data["token_usage"] = {}
         return data
 
     def save_state(project_id: str, state: Dict[str, Any]) -> None:
@@ -165,6 +223,21 @@ def create_app(
         ids = {p.name for p in projects_dir.iterdir() if p.is_dir()}
         ids.update({p.stem for p in states_dir.glob("*.json")})
         return sorted(ids)
+
+    def list_projects_with_meta() -> List[Dict[str, Any]]:
+        """返回所有项目及 created_at，按创建时间升序（越早越靠前，越晚越靠后）。"""
+        results: List[Dict[str, Any]] = []
+        for pid in list_project_ids():
+            st = checkpointer.load_state(pid) or {}
+            created_at = _project_created_ts(pid, st)
+            results.append({"project_id": pid, "created_at": created_at})
+        results.sort(key=lambda x: int(x["created_at"]))
+        return results
+
+    def _tracked(state: Dict[str, Any]):
+        """返回绑定到 state['token_usage'] 的 (planner, writer) 包装器。"""
+        tu = state.setdefault("token_usage", {})
+        return TokenTrackingLLM(planner, tu), TokenTrackingLLM(writer, tu)
 
     EMPTY_PROJECT_GRACE_SECONDS = 10 * 60
 
@@ -254,33 +327,67 @@ def create_app(
             logger.error(msg)
             raise HTTPException(status_code=504, detail=msg)
 
-    async def generate_chapter_for_current_index(state: Dict[str, Any], *, scene: str) -> None:
+    async def generate_chapter_for_current_index(
+        state: Dict[str, Any],
+        *,
+        scene: str,
+        tp: Any = None,
+        tw: Any = None,
+        tw_stream: Any = None,
+        emit_progress: Optional[ProgressFn] = None,
+        stream_llm_output: bool = False,
+    ) -> None:
+        _emit = emit_progress or _noop_progress
+        _p, _w = (tp, tw) if tp is not None and tw is not None else (planner, writer)
+        _tw_refine = tw_stream or _w
+        pid = state.get("project_id", "")
+        ch_idx = state.get("current_chapter_index")
+        logger.info("[%s] pipeline_start project=%s chapter_index=%s", scene, pid, ch_idx)
         try:
+            await _emit("write_chapter", "正在撰写本章初稿（LLM，可能较慢）…")
+            logger.info("[%s] step=write_chapter project=%s chapter_index=%s", scene, pid, ch_idx)
             out = await write_chapter_node(
                 state,
-                llm=writer,
+                llm=_w,
                 chapter_store=chapter_store,
                 rag_retriever=rag_retriever,
                 graph_store=graph_store,
             )
             state.update(out)
-            out = await refine_chapter_node(state, llm=writer, chapter_store=chapter_store)
+            await _emit("refine_chapter", "正在润色本章（LLM）…")
+            logger.info("[%s] step=refine_chapter project=%s chapter_index=%s", scene, pid, ch_idx)
+            out = await refine_chapter_node(
+                state,
+                llm=_tw_refine,
+                chapter_store=chapter_store,
+                stream_llm_output=stream_llm_output,
+                emit_token_progress=_emit if stream_llm_output else None,
+            )
             state.update(out)
             if state.get("enable_chapter_illustrations", False):
-                out = await identify_illustration_points_node(state, llm=planner, chapter_store=chapter_store)
+                await _emit("illustration_points", "正在识别插图位置（LLM）…")
+                logger.info("[%s] step=identify_illustration_points project=%s", scene, pid)
+                out = await identify_illustration_points_node(state, llm=_p, chapter_store=chapter_store)
                 state.update(out)
+                await _emit("illustration_fetch", "正在搜索/生成插图资源…")
+                logger.info("[%s] step=fetch_or_generate_images project=%s", scene, pid)
                 out = await fetch_or_generate_images_node(state, project_root=projects_dir)
                 state.update(out)
+                await _emit("illustration_insert", "正在将插图插入正文…")
+                logger.info("[%s] step=insert_illustrations project=%s", scene, pid)
                 out = await insert_illustrations_into_chapter_node(state, chapter_store=chapter_store)
                 state.update(out)
+            await _emit("post_chapter", "正在生成摘要并更新人物图谱（LLM）…")
+            logger.info("[%s] step=post_chapter project=%s chapter_index=%s", scene, pid, ch_idx)
             out = await post_chapter_node(
                 state,
-                llm=planner,
+                llm=_p,
                 chapter_store=chapter_store,
                 rag_indexer=rag_indexer,
                 graph_store=graph_store,
             )
             state.update(out)
+            logger.info("[%s] pipeline_done project=%s chapter_index=%s", scene, pid, ch_idx)
         except Exception as exc:
             raise_llm_http_error(exc, scene=scene)
             raise
@@ -304,7 +411,7 @@ def create_app(
     @app.get("/projects")
     async def list_projects():
         cleanup_empty_projects()
-        return {"projects": [{"project_id": pid} for pid in list_project_ids()]}
+        return {"projects": list_projects_with_meta()}
 
     @app.get("/projects/{project_id}")
     async def get_project(project_id: str):
@@ -320,42 +427,67 @@ def create_app(
             "current_chapter_index": state.get("current_chapter_index", 0),
             "total_chapters": state.get("total_chapters"),
             "chapter_word_target": state.get("chapter_word_target"),
+            "enable_chapter_illustrations": state.get("enable_chapter_illustrations", False),
+            "created_at": _project_created_ts(project_id, state),
+            "token_usage": state.get("token_usage") or {},
         }
 
     @app.post("/projects/{project_id}/plot-ideas")
-    async def generate_plot_ideas(project_id: str, req: PlotIdeasRequest):
+    async def generate_plot_ideas(project_id: str, req: PlotIdeasRequest, stream: bool = Query(False)):
         if not project_exists(project_id):
             raise HTTPException(status_code=404, detail="project not found")
-        state = load_state(project_id)
-        state["instruction"] = req.instruction
-        try:
-            out = await generate_plot_ideas_node(state, llm=planner)
-        except Exception as exc:
-            raise_llm_http_error(exc, scene="生成剧情概要")
-            raise
-        state.update(out)
-        save_state(project_id, state)
-        return {"plot_ideas": state.get("plot_ideas", [])}
+
+        async def _run_plot_ideas(emit: ProgressFn) -> Dict[str, Any]:
+            state = load_state(project_id)
+            state["instruction"] = req.instruction
+            tp, tw = _tracked(state)
+            logger.info("[生成剧情概要] start project=%s", project_id)
+            await emit("plot_ideas", "正在生成剧情概要候选（LLM）…")
+            try:
+                out = await generate_plot_ideas_node(state, llm=tp)
+            except Exception as exc:
+                raise_llm_http_error(exc, scene="生成剧情概要")
+                raise
+            state.update(out)
+            save_state(project_id, state)
+            logger.info("[生成剧情概要] done project=%s ideas=%s", project_id, len(state.get("plot_ideas", [])))
+            return {"plot_ideas": state.get("plot_ideas", [])}
+
+        if stream:
+            return StreamingResponse(ndjson_with_progress(_run_plot_ideas), media_type=NDJSON_MEDIA)
+        return await _run_plot_ideas(_noop_progress)
 
     @app.post("/projects/{project_id}/outline")
-    async def generate_outline(project_id: str, req: OutlineRequest):
+    async def generate_outline(project_id: str, req: OutlineRequest, stream: bool = Query(False)):
         if not project_exists(project_id):
             raise HTTPException(status_code=404, detail="project not found")
-        state = load_state(project_id)
-        state["selected_plot_summary"] = req.selected_plot_summary
-        if req.total_chapters is not None:
-            state["total_chapters"] = int(req.total_chapters)
-        try:
-            out = await plan_outline_node(state, llm=planner)
-        except Exception as exc:
-            raise_llm_http_error(exc, scene="生成大纲")
-            raise
-        state.update(out)
-        save_state(project_id, state)
-        return {
-            "outline_structure": state.get("outline_structure", {"volumes": []}),
-            "outline": state.get("outline", ""),
-        }
+
+        async def _run_outline(emit: ProgressFn) -> Dict[str, Any]:
+            state = load_state(project_id)
+            state["selected_plot_summary"] = req.selected_plot_summary
+            if req.total_chapters is not None:
+                state["total_chapters"] = int(req.total_chapters)
+            tp, tw = _tracked(state)
+            logger.info("[生成大纲] start project=%s total_chapters=%s", project_id, state.get("total_chapters"))
+            await emit("plan_outline", "正在生成全书结构化大纲（LLM，可能需数分钟）…")
+            try:
+                out = await plan_outline_node(state, llm=tp, rag_indexer=rag_indexer)
+            except Exception as exc:
+                raise_llm_http_error(exc, scene="生成大纲")
+                raise
+            state.update(out)
+            await emit("persist", "正在保存大纲并写入 RAG 索引…")
+            save_state(project_id, state)
+            vols = (state.get("outline_structure") or {}).get("volumes") or []
+            logger.info("[生成大纲] done project=%s volumes=%s", project_id, len(vols))
+            return {
+                "outline_structure": state.get("outline_structure", {"volumes": []}),
+                "outline": state.get("outline", ""),
+            }
+
+        if stream:
+            return StreamingResponse(ndjson_with_progress(_run_outline), media_type=NDJSON_MEDIA)
+        return await _run_outline(_noop_progress)
 
     @app.get("/projects/{project_id}/chapters")
     async def list_chapters(project_id: str):
@@ -395,56 +527,102 @@ def create_app(
         return {"chapter_index": int(chapter_index), "character_graph": graph}
 
     @app.post("/projects/{project_id}/chapters/next")
-    async def write_next_chapter(project_id: str, req: NextChapterRequest):
+    async def write_next_chapter(project_id: str, req: NextChapterRequest, stream: bool = Query(False)):
         if not project_exists(project_id):
             raise HTTPException(status_code=404, detail="project not found")
-        state = load_state(project_id)
-        outline = state.get("outline_structure", {"volumes": []})
-        if not outline.get("volumes"):
-            raise HTTPException(status_code=400, detail="outline not generated")
 
-        chapters = state.get("chapters", [])
-        next_idx = max([int(c.get("index", -1)) for c in chapters], default=-1) + 1
-        state["current_chapter_index"] = next_idx
-        if req.chapter_word_target is not None:
-            state["chapter_word_target"] = int(req.chapter_word_target)
-        if req.enable_chapter_illustrations is not None:
-            state["enable_chapter_illustrations"] = bool(req.enable_chapter_illustrations)
+        async def _run_next(emit: ProgressFn) -> Dict[str, Any]:
+            state = load_state(project_id)
+            outline = state.get("outline_structure", {"volumes": []})
+            if not outline.get("volumes"):
+                raise HTTPException(status_code=400, detail="outline not generated")
 
-        await generate_chapter_for_current_index(state, scene="续写下一章")
-        save_state(project_id, state)
+            chapters = state.get("chapters", [])
+            next_idx = max([int(c.get("index", -1)) for c in chapters], default=-1) + 1
+            state["current_chapter_index"] = next_idx
+            if req.chapter_word_target is not None:
+                state["chapter_word_target"] = int(req.chapter_word_target)
+            if req.enable_chapter_illustrations is not None:
+                state["enable_chapter_illustrations"] = bool(req.enable_chapter_illustrations)
 
-        meta = chapter_meta_of(state, next_idx)
-        content = chapter_store.load(project_id, next_idx)
-        return {"chapter_index": next_idx, "chapter": content, "meta": meta}
+            tp, tw = _tracked(state)
+            tw_stream = None
+            if stream:
+                tu = state.setdefault("token_usage", {})
+                tw_stream = TokenTrackingLLM(writer_streaming, tu)
+            logger.info("[续写下一章] start project=%s next_index=%s", project_id, next_idx)
+            await emit("chapter_pipeline", f"开始续写第 {next_idx + 1} 章…")
+            await generate_chapter_for_current_index(
+                state,
+                scene="续写下一章",
+                tp=tp,
+                tw=tw,
+                tw_stream=tw_stream,
+                emit_progress=emit,
+                stream_llm_output=bool(stream),
+            )
+            save_state(project_id, state)
+
+            meta = chapter_meta_of(state, next_idx)
+            content = chapter_store.load(project_id, next_idx)
+            logger.info("[续写下一章] done project=%s chapter_index=%s", project_id, next_idx)
+            return {"chapter_index": next_idx, "chapter": content, "meta": meta}
+
+        if stream:
+            return StreamingResponse(ndjson_with_progress(_run_next), media_type=NDJSON_MEDIA)
+        return await _run_next(_noop_progress)
 
     @app.post("/projects/{project_id}/chapters/{index}/regenerate")
-    async def regenerate_chapter(project_id: str, index: int, req: RegenerateChapterRequest):
+    async def regenerate_chapter(
+        project_id: str, index: int, req: RegenerateChapterRequest, stream: bool = Query(False)
+    ):
         if not project_exists(project_id):
             raise HTTPException(status_code=404, detail="project not found")
-        state = load_state(project_id)
-        outline = state.get("outline_structure", {"volumes": []})
-        if not outline.get("volumes"):
-            raise HTTPException(status_code=400, detail="outline not generated")
-        ensure_latest_chapter_only(state, index)
 
-        try:
-            chapter_store.load(project_id, int(index))
-        except FileNotFoundError:
-            raise HTTPException(status_code=404, detail="chapter not found")
+        async def _run_regen(emit: ProgressFn) -> Dict[str, Any]:
+            state = load_state(project_id)
+            outline = state.get("outline_structure", {"volumes": []})
+            if not outline.get("volumes"):
+                raise HTTPException(status_code=400, detail="outline not generated")
+            ensure_latest_chapter_only(state, index)
 
-        state["current_chapter_index"] = int(index)
-        if req.chapter_word_target is not None:
-            state["chapter_word_target"] = int(req.chapter_word_target)
-        if req.enable_chapter_illustrations is not None:
-            state["enable_chapter_illustrations"] = bool(req.enable_chapter_illustrations)
+            try:
+                chapter_store.load(project_id, int(index))
+            except FileNotFoundError:
+                raise HTTPException(status_code=404, detail="chapter not found")
 
-        await generate_chapter_for_current_index(state, scene="重新生成本章")
-        save_state(project_id, state)
+            state["current_chapter_index"] = int(index)
+            if req.chapter_word_target is not None:
+                state["chapter_word_target"] = int(req.chapter_word_target)
+            if req.enable_chapter_illustrations is not None:
+                state["enable_chapter_illustrations"] = bool(req.enable_chapter_illustrations)
 
-        meta = chapter_meta_of(state, int(index))
-        content = chapter_store.load(project_id, int(index))
-        return {"chapter_index": int(index), "chapter": content, "meta": meta}
+            tp, tw = _tracked(state)
+            tw_stream = None
+            if stream:
+                tu = state.setdefault("token_usage", {})
+                tw_stream = TokenTrackingLLM(writer_streaming, tu)
+            logger.info("[重新生成本章] start project=%s chapter_index=%s", project_id, index)
+            await emit("chapter_pipeline", f"开始重新生成第 {int(index) + 1} 章…")
+            await generate_chapter_for_current_index(
+                state,
+                scene="重新生成本章",
+                tp=tp,
+                tw=tw,
+                tw_stream=tw_stream,
+                emit_progress=emit,
+                stream_llm_output=bool(stream),
+            )
+            save_state(project_id, state)
+
+            meta = chapter_meta_of(state, int(index))
+            content = chapter_store.load(project_id, int(index))
+            logger.info("[重新生成本章] done project=%s chapter_index=%s", project_id, index)
+            return {"chapter_index": int(index), "chapter": content, "meta": meta}
+
+        if stream:
+            return StreamingResponse(ndjson_with_progress(_run_regen), media_type=NDJSON_MEDIA)
+        return await _run_regen(_noop_progress)
 
     @app.delete("/projects/{project_id}/chapters/{index}/tail")
     async def rollback_chapters_tail(project_id: str, index: int):
@@ -504,51 +682,78 @@ def create_app(
         }
 
     @app.post("/projects/{project_id}/chapters/{index}/rewrite")
-    async def rewrite_chapter(project_id: str, index: int, req: RewriteRequest):
+    async def rewrite_chapter(project_id: str, index: int, req: RewriteRequest, stream: bool = Query(False)):
         if not project_exists(project_id):
             raise HTTPException(status_code=404, detail="project not found")
-        state = load_state(project_id)
-        ensure_latest_chapter_only(state, index)
-        try:
-            chapter_text = chapter_store.load(project_id, index)
-        except FileNotFoundError:
-            raise HTTPException(status_code=404, detail="chapter not found")
 
-        state["current_chapter_index"] = int(index)
-        state["current_chapter_final"] = chapter_text
-        state["user_feedback"] = req.user_feedback
-        state["update_outline_on_feedback"] = bool(req.update_outline)
+        async def _run_rewrite(emit: ProgressFn) -> Dict[str, Any]:
+            state = load_state(project_id)
+            ensure_latest_chapter_only(state, index)
+            try:
+                chapter_text = chapter_store.load(project_id, index)
+            except FileNotFoundError:
+                raise HTTPException(status_code=404, detail="chapter not found")
 
-        try:
-            out = await rewrite_with_feedback_node(state, llm=writer, chapter_store=chapter_store)
-            state.update(out)
-            if req.update_outline:
-                out = await update_outline_from_feedback_node(
+            state["current_chapter_index"] = int(index)
+            state["current_chapter_final"] = chapter_text
+            state["user_feedback"] = req.user_feedback
+            state["update_outline_on_feedback"] = bool(req.update_outline)
+
+            tp, tw = _tracked(state)
+            tw_stream = None
+            if stream:
+                tu = state.setdefault("token_usage", {})
+                tw_stream = TokenTrackingLLM(writer_streaming, tu)
+            logger.info(
+                "[反馈重写] start project=%s chapter_index=%s update_outline=%s",
+                project_id,
+                index,
+                req.update_outline,
+            )
+            try:
+                await emit("rewrite", "正在根据反馈重写本章（LLM）…")
+                out = await rewrite_with_feedback_node(
                     state,
-                    llm=planner,
-                    rag_indexer=rag_indexer,
+                    llm=tw_stream or tw,
+                    chapter_store=chapter_store,
+                    stream_llm_output=bool(stream),
+                    emit_token_progress=emit if stream else None,
                 )
                 state.update(out)
+                if req.update_outline:
+                    await emit("update_outline", "正在根据重写结果更新大纲要点（LLM）…")
+                    out = await update_outline_from_feedback_node(
+                        state,
+                        llm=tp,
+                        rag_indexer=rag_indexer,
+                    )
+                    state.update(out)
 
-            out = await post_chapter_node(
-                state,
-                llm=planner,
-                chapter_store=chapter_store,
-                rag_indexer=rag_indexer,
-                graph_store=graph_store,
-            )
-            state.update(out)
-        except Exception as exc:
-            raise_llm_http_error(exc, scene="反馈重写")
-            raise
-        save_state(project_id, state)
+                await emit("post_chapter", "正在刷新摘要与人物图谱（LLM）…")
+                out = await post_chapter_node(
+                    state,
+                    llm=tp,
+                    chapter_store=chapter_store,
+                    rag_indexer=rag_indexer,
+                    graph_store=graph_store,
+                )
+                state.update(out)
+            except Exception as exc:
+                raise_llm_http_error(exc, scene="反馈重写")
+                raise
+            save_state(project_id, state)
 
-        new_text = chapter_store.load(project_id, index)
-        return {
-            "chapter_index": index,
-            "chapter": new_text,
-            "outline_structure": state.get("outline_structure", {"volumes": []}),
-        }
+            new_text = chapter_store.load(project_id, index)
+            logger.info("[反馈重写] done project=%s chapter_index=%s", project_id, index)
+            return {
+                "chapter_index": index,
+                "chapter": new_text,
+                "outline_structure": state.get("outline_structure", {"volumes": []}),
+            }
+
+        if stream:
+            return StreamingResponse(ndjson_with_progress(_run_rewrite), media_type=NDJSON_MEDIA)
+        return await _run_rewrite(_noop_progress)
 
     return app
 

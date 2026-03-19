@@ -53,7 +53,7 @@ npm run test:ui:report
 - 优先写“**不依赖 LLM**”的用例，避免 flaky：
   - ✅ `GET /projects`（刷新列表）
   - ✅ 打开项目（若已有项目）
-  - ❌ “创建并生成概要”（会触发 LLM）
+  - ❌ 「生成概要」（会触发 LLM，除非用 route stub）
   - ❌ “生成大纲 / 续写 / 重写 / 重新生成”（会触发 LLM、耗时且依赖环境）
 - 断言尽量贴近用户可见结果：
   - `#global-status` 状态栏文案
