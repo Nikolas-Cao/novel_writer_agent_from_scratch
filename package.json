@@ -1,0 +1,16 @@
+{
+  "name": "novel-writer-agent-from-scratch",
+  "private": true,
+  "version": "0.0.0",
+  "description": "UI E2E tests for Novel Writer Agent",
+  "scripts": {
+    "test:ui": "playwright test",
+    "test:ui:headed": "playwright test --headed",
+    "test:ui:debug": "playwright test --debug",
+    "test:ui:report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0"
+  }
+}
+

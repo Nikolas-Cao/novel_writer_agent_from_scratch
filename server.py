@@ -1,0 +1,583 @@
+"""
+阶段 5：FastAPI 后端服务
+提供项目、剧情概要、大纲、章节续写、反馈重写等接口。
+"""
+import argparse
+import logging
+import shutil
+import time
+import uuid
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import httpx
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from openai import APIConnectionError as OpenAIAPIConnectionError
+from openai import APITimeoutError as OpenAIAPITimeoutError
+from pydantic import BaseModel, Field
+
+from config import CHAPTER_WORD_TARGET, CHECKPOINT_DIR, DEFAULT_TOTAL_CHAPTERS, PROJECTS_ROOT, VECTOR_STORE_DIR
+from graph.llm import create_planner_llm, create_writer_llm
+from graph.nodes.generate_plot_ideas import generate_plot_ideas_node
+from graph.nodes.fetch_or_generate_images import fetch_or_generate_images_node
+from graph.nodes.identify_illustration_points import identify_illustration_points_node
+from graph.nodes.insert_illustrations_into_chapter import insert_illustrations_into_chapter_node
+from graph.nodes.plan_outline import plan_outline_node
+from graph.nodes.post_chapter import post_chapter_node
+from graph.nodes.refine_chapter import refine_chapter_node
+from graph.nodes.rewrite_feedback import rewrite_with_feedback_node
+from graph.nodes.update_outline import update_outline_from_feedback_node
+from graph.nodes.write_chapter import write_chapter_node
+from memory import LocalFileCheckpointer
+from rag import LocalRagIndexer, LocalRagRetriever
+from storage import ChapterStore, CharacterGraphStore
+
+logger = logging.getLogger(__name__)
+
+
+class CreateProjectRequest(BaseModel):
+    project_id: Optional[str] = None
+    instruction: Optional[str] = ""
+    total_chapters: Optional[int] = None
+    chapter_word_target: Optional[int] = None
+    enable_chapter_illustrations: Optional[bool] = None
+
+
+class PlotIdeasRequest(BaseModel):
+    instruction: str = Field(..., min_length=1)
+
+
+class OutlineRequest(BaseModel):
+    selected_plot_summary: str = Field(..., min_length=1)
+    total_chapters: Optional[int] = None
+
+
+class NextChapterRequest(BaseModel):
+    chapter_word_target: Optional[int] = None
+    enable_chapter_illustrations: Optional[bool] = None
+
+
+class RewriteRequest(BaseModel):
+    user_feedback: str = Field(..., min_length=1)
+    update_outline: bool = False
+
+
+class RegenerateChapterRequest(BaseModel):
+    chapter_word_target: Optional[int] = None
+    enable_chapter_illustrations: Optional[bool] = None
+
+
+def _default_state(project_id: str) -> Dict[str, Any]:
+    return {
+        "project_id": project_id,
+        "instruction": "",
+        "plot_ideas": [],
+        "selected_plot_summary": "",
+        "outline": "",
+        "outline_structure": {"volumes": []},
+        "chapters": [],
+        "current_chapter_index": 0,
+        "current_chapter_draft": "",
+        "current_chapter_final": "",
+        "character_graph": {"nodes": [], "edges": []},
+        "user_feedback": "",
+        "last_rewrite_draft": "",
+        "total_chapters": DEFAULT_TOTAL_CHAPTERS,
+        "chapter_word_target": CHAPTER_WORD_TARGET,
+        "chapter_output_format": "markdown",
+        "enable_chapter_illustrations": False,
+        "update_outline_on_feedback": False,
+        "created_at": int(time.time()),
+    }
+
+
+def create_app(
+    planner_llm: Optional[Any] = None,
+    writer_llm: Optional[Any] = None,
+    projects_root: Optional[Path] = None,
+    vector_root: Optional[Path] = None,
+    checkpoint_root: Optional[Path] = None,
+) -> FastAPI:
+    app = FastAPI(title="Novel Writer Agent API", version="0.1.0")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://127.0.0.1:5500", "http://localhost:5500", "http://127.0.0.1:8000", "http://localhost:8000"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    frontend_dir = Path(__file__).resolve().parent / "frontend"
+
+    projects_dir = Path(projects_root or PROJECTS_ROOT)
+    vector_dir = Path(vector_root or VECTOR_STORE_DIR)
+    states_dir = Path(checkpoint_root or (Path(CHECKPOINT_DIR) / "api_state"))
+    projects_dir.mkdir(parents=True, exist_ok=True)
+    vector_dir.mkdir(parents=True, exist_ok=True)
+    states_dir.mkdir(parents=True, exist_ok=True)
+
+    if frontend_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(frontend_dir)), name="assets")
+
+        @app.get("/")
+        async def frontend_index():
+            return FileResponse(str(frontend_dir / "index.html"))
+
+        @app.get("/app")
+        async def frontend_app():
+            return FileResponse(str(frontend_dir / "index.html"))
+
+        # index.html 使用 ./app.js、./styles.css，从 / 打开时需提供这些路径
+        @app.get("/app.js")
+        async def serve_app_js():
+            return FileResponse(str(frontend_dir / "app.js"), media_type="application/javascript")
+
+        @app.get("/styles.css")
+        async def serve_styles():
+            return FileResponse(str(frontend_dir / "styles.css"), media_type="text/css")
+
+    planner = planner_llm or create_planner_llm()
+    writer = writer_llm or create_writer_llm()
+
+    chapter_store = ChapterStore(root=projects_dir)
+    graph_store = CharacterGraphStore(root=projects_dir)
+    rag_indexer = LocalRagIndexer(root=vector_dir)
+    rag_retriever = LocalRagRetriever(root=vector_dir)
+    checkpointer = LocalFileCheckpointer(root=states_dir)
+
+    def ensure_project(project_id: str) -> None:
+        (projects_dir / project_id).mkdir(parents=True, exist_ok=True)
+
+    def project_exists(project_id: str) -> bool:
+        return (projects_dir / project_id).exists() or (states_dir / f"{project_id}.json").exists()
+
+    def load_state(project_id: str) -> Dict[str, Any]:
+        data = checkpointer.load_state(project_id) or _default_state(project_id)
+        if "project_id" not in data:
+            data["project_id"] = project_id
+        return data
+
+    def save_state(project_id: str, state: Dict[str, Any]) -> None:
+        checkpointer.save_state(project_id, state)
+
+    def list_project_ids() -> List[str]:
+        ids = {p.name for p in projects_dir.iterdir() if p.is_dir()}
+        ids.update({p.stem for p in states_dir.glob("*.json")})
+        return sorted(ids)
+
+    EMPTY_PROJECT_GRACE_SECONDS = 10 * 60
+
+    def _project_has_chapter_files(project_id: str) -> bool:
+        chapters_dir = projects_dir / project_id / "chapters"
+        return chapters_dir.exists() and any(chapters_dir.glob("*.md"))
+
+    def _project_created_ts(project_id: str, state: Dict[str, Any]) -> int:
+        ts = state.get("created_at")
+        if isinstance(ts, (int, float)) and ts > 0:
+            return int(ts)
+
+        state_file = states_dir / f"{project_id}.json"
+        if state_file.exists():
+            return int(state_file.stat().st_mtime)
+
+        project_dir = projects_dir / project_id
+        if project_dir.exists():
+            return int(project_dir.stat().st_mtime)
+
+        return int(time.time())
+
+    def _is_empty_project(project_id: str) -> bool:
+        state = load_state(project_id)
+        outline_structure = state.get("outline_structure") or {}
+        has_outline = bool((outline_structure.get("volumes") or [])) or bool((state.get("outline") or "").strip())
+        has_chapters = bool(state.get("chapters")) or _project_has_chapter_files(project_id)
+        has_activity = bool((state.get("instruction") or "").strip()) or bool(state.get("plot_ideas")) or bool(
+            (state.get("selected_plot_summary") or "").strip()
+        )
+        if has_outline or has_chapters:
+            return False
+        if has_activity:
+            return False
+
+        created_ts = _project_created_ts(project_id, state)
+        age_seconds = int(time.time()) - int(created_ts)
+        return age_seconds >= EMPTY_PROJECT_GRACE_SECONDS
+
+    def _delete_project_data(project_id: str) -> None:
+        state_file = states_dir / f"{project_id}.json"
+        project_dir = projects_dir / project_id
+        project_vector_dir = vector_dir / project_id
+
+        if state_file.exists():
+            state_file.unlink()
+        if project_dir.exists():
+            shutil.rmtree(project_dir, ignore_errors=True)
+        if project_vector_dir.exists():
+            shutil.rmtree(project_vector_dir, ignore_errors=True)
+
+    def cleanup_empty_projects() -> None:
+        for project_id in list_project_ids():
+            if _is_empty_project(project_id):
+                _delete_project_data(project_id)
+
+    def chapter_meta_of(state: Dict[str, Any], chapter_index: int) -> Optional[Dict[str, Any]]:
+        for item in state.get("chapters", []):
+            if int(item.get("index", -1)) == int(chapter_index):
+                return item
+        return None
+
+    def latest_chapter_index(state: Dict[str, Any]) -> Optional[int]:
+        chapters = state.get("chapters", [])
+        if not chapters:
+            return None
+        return max(int(item.get("index", -1)) for item in chapters)
+
+    def ensure_latest_chapter_only(state: Dict[str, Any], index: int) -> None:
+        latest_idx = latest_chapter_index(state)
+        if latest_idx is None:
+            raise HTTPException(status_code=400, detail="no chapters generated")
+        if int(index) != int(latest_idx):
+            raise HTTPException(
+                status_code=400,
+                detail=f"only latest chapter can be rewritten/regenerated (latest={latest_idx})",
+            )
+
+    def raise_llm_http_error(exc: Exception, *, scene: str) -> None:
+        """把 LLM 常见异常转换为前端可展示的 HTTP 错误。"""
+        if isinstance(exc, (OpenAIAPIConnectionError, httpx.ConnectError)):
+            msg = f"LLM 连接失败（{scene}）：{exc}"
+            logger.error(msg)
+            raise HTTPException(status_code=502, detail=msg)
+        if isinstance(exc, (OpenAIAPITimeoutError, httpx.TimeoutException, TimeoutError)):
+            msg = f"LLM 响应超时（{scene}）：{exc}"
+            logger.error(msg)
+            raise HTTPException(status_code=504, detail=msg)
+
+    async def generate_chapter_for_current_index(state: Dict[str, Any], *, scene: str) -> None:
+        try:
+            out = await write_chapter_node(
+                state,
+                llm=writer,
+                chapter_store=chapter_store,
+                rag_retriever=rag_retriever,
+                graph_store=graph_store,
+            )
+            state.update(out)
+            out = await refine_chapter_node(state, llm=writer, chapter_store=chapter_store)
+            state.update(out)
+            if state.get("enable_chapter_illustrations", False):
+                out = await identify_illustration_points_node(state, llm=planner, chapter_store=chapter_store)
+                state.update(out)
+                out = await fetch_or_generate_images_node(state, project_root=projects_dir)
+                state.update(out)
+                out = await insert_illustrations_into_chapter_node(state, chapter_store=chapter_store)
+                state.update(out)
+            out = await post_chapter_node(
+                state,
+                llm=planner,
+                chapter_store=chapter_store,
+                rag_indexer=rag_indexer,
+                graph_store=graph_store,
+            )
+            state.update(out)
+        except Exception as exc:
+            raise_llm_http_error(exc, scene=scene)
+            raise
+
+    @app.post("/projects")
+    async def create_project(req: CreateProjectRequest):
+        project_id = req.project_id or f"p-{uuid.uuid4().hex[:12]}"
+        ensure_project(project_id)
+        state = _default_state(project_id)
+        if req.instruction:
+            state["instruction"] = req.instruction
+        if req.total_chapters is not None:
+            state["total_chapters"] = int(req.total_chapters)
+        if req.chapter_word_target is not None:
+            state["chapter_word_target"] = int(req.chapter_word_target)
+        if req.enable_chapter_illustrations is not None:
+            state["enable_chapter_illustrations"] = bool(req.enable_chapter_illustrations)
+        save_state(project_id, state)
+        return {"project_id": project_id}
+
+    @app.get("/projects")
+    async def list_projects():
+        cleanup_empty_projects()
+        return {"projects": [{"project_id": pid} for pid in list_project_ids()]}
+
+    @app.get("/projects/{project_id}")
+    async def get_project(project_id: str):
+        if not project_exists(project_id):
+            raise HTTPException(status_code=404, detail="project not found")
+        state = load_state(project_id)
+        return {
+            "project_id": project_id,
+            "instruction": state.get("instruction", ""),
+            "selected_plot_summary": state.get("selected_plot_summary", ""),
+            "outline_structure": state.get("outline_structure", {"volumes": []}),
+            "chapters": state.get("chapters", []),
+            "current_chapter_index": state.get("current_chapter_index", 0),
+            "total_chapters": state.get("total_chapters"),
+            "chapter_word_target": state.get("chapter_word_target"),
+        }
+
+    @app.post("/projects/{project_id}/plot-ideas")
+    async def generate_plot_ideas(project_id: str, req: PlotIdeasRequest):
+        if not project_exists(project_id):
+            raise HTTPException(status_code=404, detail="project not found")
+        state = load_state(project_id)
+        state["instruction"] = req.instruction
+        try:
+            out = await generate_plot_ideas_node(state, llm=planner)
+        except Exception as exc:
+            raise_llm_http_error(exc, scene="生成剧情概要")
+            raise
+        state.update(out)
+        save_state(project_id, state)
+        return {"plot_ideas": state.get("plot_ideas", [])}
+
+    @app.post("/projects/{project_id}/outline")
+    async def generate_outline(project_id: str, req: OutlineRequest):
+        if not project_exists(project_id):
+            raise HTTPException(status_code=404, detail="project not found")
+        state = load_state(project_id)
+        state["selected_plot_summary"] = req.selected_plot_summary
+        if req.total_chapters is not None:
+            state["total_chapters"] = int(req.total_chapters)
+        try:
+            out = await plan_outline_node(state, llm=planner)
+        except Exception as exc:
+            raise_llm_http_error(exc, scene="生成大纲")
+            raise
+        state.update(out)
+        save_state(project_id, state)
+        return {
+            "outline_structure": state.get("outline_structure", {"volumes": []}),
+            "outline": state.get("outline", ""),
+        }
+
+    @app.get("/projects/{project_id}/chapters")
+    async def list_chapters(project_id: str):
+        if not project_exists(project_id):
+            raise HTTPException(status_code=404, detail="project not found")
+        state = load_state(project_id)
+        return {"chapters": state.get("chapters", [])}
+
+    @app.get("/projects/{project_id}/chapters/{index}")
+    async def get_chapter(project_id: str, index: int):
+        if not project_exists(project_id):
+            raise HTTPException(status_code=404, detail="project not found")
+        state = load_state(project_id)
+        meta = chapter_meta_of(state, index)
+        try:
+            if meta and meta.get("path_or_content_ref"):
+                content = chapter_store.load_by_ref(meta["path_or_content_ref"])
+            else:
+                content = chapter_store.load(project_id, index)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="chapter not found")
+        return {"index": index, "content": content, "meta": meta}
+
+    @app.get("/projects/{project_id}/character-graph")
+    async def get_character_graph(project_id: str, chapter_index: Optional[int] = None):
+        if not project_exists(project_id):
+            raise HTTPException(status_code=404, detail="project not found")
+        state = load_state(project_id)
+        if chapter_index is None:
+            latest_idx = latest_chapter_index(state)
+            graph = graph_store.load_for_chapter(project_id, latest_idx if latest_idx is not None else -1)
+            return {"chapter_index": latest_idx, "character_graph": graph}
+        try:
+            graph = graph_store.load_for_chapter(project_id, int(chapter_index))
+        except FileNotFoundError:
+            graph = {"nodes": [], "edges": []}
+        return {"chapter_index": int(chapter_index), "character_graph": graph}
+
+    @app.post("/projects/{project_id}/chapters/next")
+    async def write_next_chapter(project_id: str, req: NextChapterRequest):
+        if not project_exists(project_id):
+            raise HTTPException(status_code=404, detail="project not found")
+        state = load_state(project_id)
+        outline = state.get("outline_structure", {"volumes": []})
+        if not outline.get("volumes"):
+            raise HTTPException(status_code=400, detail="outline not generated")
+
+        chapters = state.get("chapters", [])
+        next_idx = max([int(c.get("index", -1)) for c in chapters], default=-1) + 1
+        state["current_chapter_index"] = next_idx
+        if req.chapter_word_target is not None:
+            state["chapter_word_target"] = int(req.chapter_word_target)
+        if req.enable_chapter_illustrations is not None:
+            state["enable_chapter_illustrations"] = bool(req.enable_chapter_illustrations)
+
+        await generate_chapter_for_current_index(state, scene="续写下一章")
+        save_state(project_id, state)
+
+        meta = chapter_meta_of(state, next_idx)
+        content = chapter_store.load(project_id, next_idx)
+        return {"chapter_index": next_idx, "chapter": content, "meta": meta}
+
+    @app.post("/projects/{project_id}/chapters/{index}/regenerate")
+    async def regenerate_chapter(project_id: str, index: int, req: RegenerateChapterRequest):
+        if not project_exists(project_id):
+            raise HTTPException(status_code=404, detail="project not found")
+        state = load_state(project_id)
+        outline = state.get("outline_structure", {"volumes": []})
+        if not outline.get("volumes"):
+            raise HTTPException(status_code=400, detail="outline not generated")
+        ensure_latest_chapter_only(state, index)
+
+        try:
+            chapter_store.load(project_id, int(index))
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="chapter not found")
+
+        state["current_chapter_index"] = int(index)
+        if req.chapter_word_target is not None:
+            state["chapter_word_target"] = int(req.chapter_word_target)
+        if req.enable_chapter_illustrations is not None:
+            state["enable_chapter_illustrations"] = bool(req.enable_chapter_illustrations)
+
+        await generate_chapter_for_current_index(state, scene="重新生成本章")
+        save_state(project_id, state)
+
+        meta = chapter_meta_of(state, int(index))
+        content = chapter_store.load(project_id, int(index))
+        return {"chapter_index": int(index), "chapter": content, "meta": meta}
+
+    @app.delete("/projects/{project_id}/chapters/{index}/tail")
+    async def rollback_chapters_tail(project_id: str, index: int):
+        if not project_exists(project_id):
+            raise HTTPException(status_code=404, detail="project not found")
+        state = load_state(project_id)
+        chapters = list(state.get("chapters", []))
+        if not chapters:
+            raise HTTPException(status_code=400, detail="no chapters generated")
+
+        keep_to = int(index)
+        latest_idx = latest_chapter_index(state)
+        if keep_to < 0:
+            raise HTTPException(status_code=400, detail="index must be >= 0")
+        if latest_idx is None or keep_to > latest_idx:
+            raise HTTPException(status_code=400, detail="index out of range")
+
+        to_delete = [item for item in chapters if int(item.get("index", -1)) > keep_to]
+        if not to_delete:
+            return {
+                "kept_until": keep_to,
+                "deleted_count": 0,
+                "chapters": chapters,
+                "current_chapter_index": state.get("current_chapter_index", 0),
+            }
+
+        for item in to_delete:
+            chapter_idx = int(item.get("index", -1))
+            ref = item.get("path_or_content_ref")
+            try:
+                if ref:
+                    chapter_path = projects_dir / ref
+                else:
+                    chapter_path = chapter_store.path_for(project_id, chapter_idx)
+                if chapter_path.exists():
+                    chapter_path.unlink()
+            except OSError:
+                logger.warning("Failed to delete chapter file: project=%s index=%s", project_id, chapter_idx)
+
+        state["chapters"] = [item for item in chapters if int(item.get("index", -1)) <= keep_to]
+        state["current_chapter_index"] = keep_to
+        if int(state.get("current_chapter_index", 0)) > keep_to:
+            state["current_chapter_index"] = keep_to
+        if int(state.get("current_chapter_index", 0)) < 0:
+            state["current_chapter_index"] = 0
+
+        rag_indexer.delete_chapter_summaries_from(project_id, keep_to + 1)
+        graph_store.delete_snapshots_from(project_id, keep_to + 1)
+        graph_store.refresh_legacy_latest(project_id)
+        state["character_graph"] = graph_store.load_for_chapter(project_id, keep_to)
+        save_state(project_id, state)
+        return {
+            "kept_until": keep_to,
+            "deleted_count": len(to_delete),
+            "chapters": state.get("chapters", []),
+            "current_chapter_index": state.get("current_chapter_index", keep_to),
+        }
+
+    @app.post("/projects/{project_id}/chapters/{index}/rewrite")
+    async def rewrite_chapter(project_id: str, index: int, req: RewriteRequest):
+        if not project_exists(project_id):
+            raise HTTPException(status_code=404, detail="project not found")
+        state = load_state(project_id)
+        ensure_latest_chapter_only(state, index)
+        try:
+            chapter_text = chapter_store.load(project_id, index)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="chapter not found")
+
+        state["current_chapter_index"] = int(index)
+        state["current_chapter_final"] = chapter_text
+        state["user_feedback"] = req.user_feedback
+        state["update_outline_on_feedback"] = bool(req.update_outline)
+
+        try:
+            out = await rewrite_with_feedback_node(state, llm=writer, chapter_store=chapter_store)
+            state.update(out)
+            if req.update_outline:
+                out = await update_outline_from_feedback_node(
+                    state,
+                    llm=planner,
+                    rag_indexer=rag_indexer,
+                )
+                state.update(out)
+
+            out = await post_chapter_node(
+                state,
+                llm=planner,
+                chapter_store=chapter_store,
+                rag_indexer=rag_indexer,
+                graph_store=graph_store,
+            )
+            state.update(out)
+        except Exception as exc:
+            raise_llm_http_error(exc, scene="反馈重写")
+            raise
+        save_state(project_id, state)
+
+        new_text = chapter_store.load(project_id, index)
+        return {
+            "chapter_index": index,
+            "chapter": new_text,
+            "outline_structure": state.get("outline_structure", {"volumes": []}),
+        }
+
+    return app
+
+
+app = create_app()
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="启动 Novel Writer Agent 后端服务")
+    parser.add_argument("--host", default="127.0.0.1", help="监听地址，默认 127.0.0.1")
+    parser.add_argument("--port", type=int, default=8000, help="监听端口，默认 8000")
+    parser.add_argument("--reload", action="store_true", help="启用自动重载（开发环境）")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    try:
+        import uvicorn
+    except ImportError as exc:
+        raise RuntimeError("未安装 uvicorn，请先执行：pip install uvicorn") from exc
+
+    uvicorn.run(
+        "server:app",
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+    )
+
+
+if __name__ == "__main__":
+    main()
