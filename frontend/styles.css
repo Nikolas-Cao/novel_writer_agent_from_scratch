@@ -797,3 +797,362 @@ button:disabled:active {
     grid-template-columns: 1fr;
   }
 }
+
+/* =========================================================
+   Magazine Minimal Theme (全局替换：更留白/更可读/更细线)
+   注：不改 DOM 结构，只覆盖现有选择器的视觉样式。
+   ========================================================= */
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-size: 14px;
+  line-height: 1.75;
+  background: #f6f7fb !important;
+  color: #0f172a !important;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.layout {
+  padding: 18px;
+  gap: 16px;
+}
+
+.topbar {
+  background: #ffffff !important;
+  color: #0f172a !important;
+  border-bottom: 1px solid #e5e7eb !important;
+  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.06) !important;
+  backdrop-filter: none !important;
+}
+
+.subtitle {
+  opacity: 0.9;
+}
+
+.status {
+  margin-top: 2px;
+  background: #f8fafc !important;
+  border: 1px solid #e5e7eb !important;
+  color: #334155 !important;
+  box-shadow: none !important;
+}
+
+.status.is-error {
+  background: rgba(239, 68, 68, 0.08) !important;
+  border-color: rgba(239, 68, 68, 0.35) !important;
+  color: #991b1b !important;
+}
+
+.status.is-working {
+  background: rgba(15, 118, 110, 0.08) !important;
+  border-color: rgba(15, 118, 110, 0.32) !important;
+  color: #0f766e !important;
+}
+
+.status.is-ok {
+  background: rgba(22, 163, 74, 0.08) !important;
+  border-color: rgba(22, 163, 74, 0.32) !important;
+  color: #15803d !important;
+}
+
+.panel {
+  background: rgba(255, 255, 255, 0.98) !important;
+  border: 1px solid #e5e7eb !important;
+  border-radius: 16px !important;
+  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.06) !important;
+  backdrop-filter: none !important;
+}
+
+.panel h2,
+.panel h3 {
+  color: #0f172a !important;
+}
+
+.panel h2 {
+  font-size: 18px;
+  border-bottom: 1px solid #e5e7eb !important;
+  padding-bottom: 10px;
+}
+
+label {
+  color: #334155 !important;
+}
+
+textarea,
+input[type="number"] {
+  background: #ffffff !important;
+  border: 1px solid #dbe2ee !important;
+  border-radius: 12px !important;
+  outline: none !important;
+  transition: box-shadow 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+textarea:focus,
+input[type="number"]:focus {
+  border-color: rgba(15, 23, 42, 0.35) !important;
+  box-shadow: 0 0 0 3px rgba(15, 23, 42, 0.08) !important;
+  background: #ffffff !important;
+}
+
+button {
+  background: #111827 !important;
+  border: 1px solid rgba(17, 24, 39, 0.12) !important;
+  color: #ffffff !important;
+  border-radius: 12px !important;
+  box-shadow: 0 1px 0 rgba(17, 24, 39, 0.12) !important;
+  transition: transform 0.08s ease, box-shadow 0.15s ease, filter 0.15s ease;
+}
+
+button:hover {
+  filter: brightness(1.02) !important;
+  transform: translateY(-1px) !important;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08) !important;
+}
+
+button:active {
+  transform: translateY(0) !important;
+}
+
+button:disabled {
+  opacity: 0.55 !important;
+  cursor: not-allowed !important;
+  transform: none !important;
+  box-shadow: none !important;
+  filter: none !important;
+}
+
+.row {
+  margin: 12px 0;
+  gap: 10px;
+}
+
+.list li {
+  background: #ffffff !important;
+  border: 1px solid #e5e7eb !important;
+  border-radius: 12px !important;
+  margin-bottom: 10px;
+  box-shadow: none !important;
+}
+
+.panel-list .list .project-item.selected {
+  border-color: rgba(15, 23, 42, 0.28) !important;
+  background: #f8fafc !important;
+  box-shadow: 0 0 0 2px rgba(15, 23, 42, 0.06) !important;
+}
+
+.project-selected-tag {
+  color: #0f172a !important;
+  background: rgba(15, 23, 42, 0.06) !important;
+  border-color: rgba(15, 23, 42, 0.12) !important;
+}
+
+.project-preview {
+  background: rgba(15, 23, 42, 0.04) !important;
+  border-color: rgba(15, 23, 42, 0.12) !important;
+  color: #0f172a !important;
+}
+
+.cards {
+  border-radius: 14px;
+  padding: 10px 4px 10px 0;
+}
+
+.card {
+  background: #ffffff !important;
+  border: 1px solid #e5e7eb !important;
+  box-shadow: none !important;
+  border-radius: 14px !important;
+}
+
+.card:hover {
+  transform: translateY(-1px) !important;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06) !important;
+}
+
+.card.selected {
+  border-color: rgba(15, 23, 42, 0.34) !important;
+  background: #f8fafc !important;
+  box-shadow: 0 0 0 2px rgba(15, 23, 42, 0.06) !important;
+}
+
+.card-radio {
+  border-color: #d1d5db !important;
+  background: #ffffff !important;
+}
+
+.card.selected .card-radio {
+  border-color: #111827 !important;
+  background: radial-gradient(circle at center, #111827 45%, #fff 46%) !important;
+}
+
+.card-head {
+  color: #0f172a !important;
+}
+
+.selected-idea,
+.meta {
+  background: #f8fafc !important;
+  border-color: #e5e7eb !important;
+  color: #0f172a !important;
+}
+
+.checkbox {
+  background: #f8fafc !important;
+  border-color: #e5e7eb !important;
+}
+
+.markdown {
+  border: 1px solid #e5e7eb !important;
+  border-radius: 16px !important;
+  background: #ffffff !important;
+  padding: 18px !important;
+  box-shadow: none !important;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3 {
+  color: #0f172a !important;
+  margin: 18px 0 10px !important;
+  line-height: 1.35 !important;
+}
+
+.markdown h1 {
+  font-size: 20px !important;
+}
+
+.markdown h2 {
+  font-size: 16px !important;
+}
+
+.markdown h3 {
+  font-size: 14px !important;
+  font-weight: 700 !important;
+}
+
+.markdown p {
+  margin: 0 0 14px !important;
+}
+
+.markdown ul,
+.markdown ol {
+  margin: 10px 0 14px 18px !important;
+  padding: 0 !important;
+}
+
+.markdown li {
+  margin: 6px 0 !important;
+}
+
+.markdown blockquote {
+  margin: 12px 0 !important;
+  padding: 10px 14px !important;
+  border-left: 3px solid #111827 !important;
+  background: rgba(15, 23, 42, 0.03) !important;
+  border-radius: 10px !important;
+}
+
+.markdown img {
+  border-radius: 12px !important;
+  border: 1px solid #e5e7eb !important;
+  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.06) !important;
+}
+
+.graph-meta {
+  background: #f8fafc !important;
+  border-color: #e5e7eb !important;
+  color: #374151 !important;
+}
+
+.graph-col h4 {
+  color: #0f172a !important;
+}
+
+.panel-detail.has-outline .detail-col {
+  padding-right: 6px !important;
+}
+
+#outline-view {
+  border-radius: 14px;
+}
+
+#outline-view details {
+  border: 1px solid #e5e7eb !important;
+  background: #ffffff !important;
+}
+
+#outline-view summary {
+  color: #0f172a !important;
+  font-weight: 700 !important;
+}
+
+.outline-chapter {
+  border-left: 3px solid transparent !important;
+}
+
+.outline-chapter.is-current {
+  border-left-color: #111827 !important;
+  background: rgba(15, 23, 42, 0.04) !important;
+  color: #0f172a !important;
+}
+
+.outline-chapter.is-current strong {
+  color: #0f172a !important;
+}
+
+#chapter-list li.is-selected {
+  border-color: rgba(17, 24, 39, 0.34) !important;
+  background: #f8fafc !important;
+  box-shadow: none !important;
+}
+
+#outline-view::-webkit-scrollbar,
+.panel-detail::-webkit-scrollbar,
+.cards::-webkit-scrollbar,
+.markdown::-webkit-scrollbar {
+  width: 10px;
+}
+
+#outline-view::-webkit-scrollbar-thumb,
+.panel-detail::-webkit-scrollbar-thumb,
+.cards::-webkit-scrollbar-thumb,
+.markdown::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.16) !important;
+  border-radius: 999px !important;
+}
+
+#outline-view::-webkit-scrollbar-thumb:hover,
+.panel-detail::-webkit-scrollbar-thumb:hover,
+.cards::-webkit-scrollbar-thumb:hover,
+.markdown::-webkit-scrollbar-thumb:hover {
+  background: rgba(15, 23, 42, 0.28) !important;
+}
+
+.panel-create,
+.panel-detail {
+  background: #ffffff !important;
+}
+
+.panel-create {
+  border-radius: 16px;
+}
+
+.modal-backdrop {
+  background: rgba(15, 23, 42, 0.45) !important;
+  backdrop-filter: blur(4px) !important;
+}
+
+.modal-dialog {
+  background: #ffffff !important;
+  border-color: #e5e7eb !important;
+  box-shadow: 0 18px 42px rgba(2, 6, 23, 0.28) !important;
+}
+
+.modal-head {
+  background: #ffffff !important;
+  border-bottom-color: #e5e7eb !important;
+}
