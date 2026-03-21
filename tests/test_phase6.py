@@ -2,6 +2,8 @@
 阶段 6 验收测试：前端页面与静态资源、前后端联动。
 运行：py tests/test_phase6.py  或  py -m pytest tests/test_phase6.py -v
 """
+import json
+import re
 import shutil
 import sys
 import uuid
@@ -26,11 +28,30 @@ class _Resp:
         self.content = content
 
 
+def _front_fake_skeleton_volumes(n: int) -> str:
+    chapters = [{"title": f"第{i + 1}章", "beat": f"节拍{i}", "points": []} for i in range(n)]
+    return json.dumps({"volumes": [{"volume_title": "第一卷", "chapters": chapters}]}, ensure_ascii=False)
+
+
+def _front_fake_expand_batch(prompt: str) -> str:
+    m = re.search(r"本批 global_index 列表：([\d,]+)", prompt)
+    raw = (m.group(1) if m else "").strip()
+    indices = [int(x) for x in raw.split(",") if x.strip().isdigit()]
+    chapters = [{"global_index": g, "points": [f"p1-{g}", f"p2-{g}"]} for g in indices]
+    return json.dumps({"chapters": chapters}, ensure_ascii=False)
+
+
 class FrontPlannerLLM:
     async def ainvoke(self, prompt: str):
         if "plot_ideas" in prompt:
             return _Resp('{"plot_ideas":["概要A：雨城追案。","概要B：废土迷局。"]}')
-        if '"volumes"' in prompt and "剧情概要" in prompt:
+        if "【plan_outline_expand_batch】" in prompt:
+            return _Resp(_front_fake_expand_batch(prompt))
+        if "【plan_outline_skeleton】" in prompt:
+            m = re.search(r"目标章节数[：:]\s*(\d+)", prompt)
+            n = int(m.group(1)) if m else 12
+            return _Resp(_front_fake_skeleton_volumes(n))
+        if "【plan_outline_single】" in prompt and '"volumes"' in prompt:
             return _Resp(
                 '{"volumes":[{"volume_title":"第一卷","chapters":[{"title":"第一章 雨夜","points":["案发","主角入局"]},{"title":"第二章 追踪","points":["线索扩展"]}]}]}'
             )

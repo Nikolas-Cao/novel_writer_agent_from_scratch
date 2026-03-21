@@ -29,7 +29,7 @@ class IllustPlannerLLM:
     async def ainvoke(self, prompt: str):
         if "plot_ideas" in prompt:
             return _Resp('{"plot_ideas":["概要A：雨城追案。"]}')
-        if '"volumes"' in prompt and "剧情概要" in prompt:
+        if "【plan_outline_single】" in prompt and '"volumes"' in prompt:
             return _Resp(
                 '{"volumes":[{"volume_title":"第一卷","chapters":[{"title":"第一章 雨夜","points":["案发","追查"]}]}]}'
             )

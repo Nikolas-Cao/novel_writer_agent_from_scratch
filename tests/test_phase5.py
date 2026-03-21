@@ -2,6 +2,8 @@
 阶段 5 验收测试：FastAPI 接口流程。
 运行：py tests/test_phase5.py  或  py -m pytest tests/test_phase5.py -v
 """
+import json
+import re
 import shutil
 import sys
 import uuid
@@ -26,13 +28,41 @@ class _Resp:
         self.content = content
 
 
+def _fake_skeleton_volumes(n: int) -> str:
+    chapters = [
+        {"title": f"第{i + 1}章", "beat": f"第{i + 1}章核心推进", "points": []} for i in range(n)
+    ]
+    return json.dumps({"volumes": [{"volume_title": "第一卷", "chapters": chapters}]}, ensure_ascii=False)
+
+
+def _fake_expand_batch(prompt: str) -> str:
+    m = re.search(r"本批 global_index 列表：([\d,]+)", prompt)
+    raw = (m.group(1) if m else "").strip()
+    indices = [int(x) for x in raw.split(",") if x.strip().isdigit()]
+    chapters = []
+    for g in indices:
+        chapters.append(
+            {
+                "global_index": g,
+                "points": [f"要点A-{g}", f"要点B-{g}", f"要点C-{g}"],
+            }
+        )
+    return json.dumps({"chapters": chapters}, ensure_ascii=False)
+
+
 class ApiPlannerLLM:
     async def ainvoke(self, prompt: str):
         if "plot_ideas" in prompt:
             return _Resp(
                 '{"plot_ideas":["概要A：雨城连环失踪案。","概要B：机械城阴谋。"]}'
             )
-        if '"volumes"' in prompt and "剧情概要" in prompt:
+        if "【plan_outline_expand_batch】" in prompt:
+            return _Resp(_fake_expand_batch(prompt))
+        if "【plan_outline_skeleton】" in prompt:
+            m = re.search(r"目标章节数[：:]\s*(\d+)", prompt)
+            n = int(m.group(1)) if m else 12
+            return _Resp(_fake_skeleton_volumes(n))
+        if "【plan_outline_single】" in prompt and '"volumes"' in prompt:
             return _Resp(
                 '{"volumes":[{"volume_title":"第一卷","chapters":[{"title":"第一章 雨夜","points":["案件发生","主角入局"]},{"title":"第二章 追踪","points":["线索扩展","对手现身"]}]}]}'
             )
@@ -151,8 +181,40 @@ def test_phase5_api_flow():
     shutil.rmtree(root, ignore_errors=True)
 
 
+def test_phase5_outline_multi_phase_api():
+    from graph.nodes.plan_outline import PLAN_OUTLINE_SINGLE_CALL_MAX
+    from server import create_app
+
+    root = _tmp_root()
+    app = create_app(
+        planner_llm=ApiPlannerLLM(),
+        writer_llm=ApiWriterLLM(),
+        projects_root=root / "projects",
+        vector_root=root / "vector",
+        checkpoint_root=root / "states",
+    )
+    client = TestClient(app)
+    n = PLAN_OUTLINE_SINGLE_CALL_MAX + 3
+    r = client.post("/projects", json={"instruction": "长篇 API", "total_chapters": n})
+    assert r.status_code == 200
+    pid = r.json()["project_id"]
+    r = client.post(f"/projects/{pid}/plot-ideas", json={"instruction": "长篇 API"})
+    assert r.status_code == 200
+    ideas = r.json()["plot_ideas"]
+    r = client.post(
+        f"/projects/{pid}/outline",
+        json={"selected_plot_summary": ideas[0], "total_chapters": n},
+    )
+    assert r.status_code == 200
+    vols = r.json()["outline_structure"]["volumes"]
+    total = sum(len(v.get("chapters") or []) for v in vols)
+    assert total == n
+    shutil.rmtree(root, ignore_errors=True)
+
+
 def run_all():
     test_phase5_api_flow()
+    test_phase5_outline_multi_phase_api()
     print("Phase 5 acceptance: all passed.")
 
 

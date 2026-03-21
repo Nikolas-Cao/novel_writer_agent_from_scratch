@@ -48,9 +48,14 @@ async def _noop_progress(_stage: str, _msg: str = "") -> None:
 
 
 async def ndjson_with_progress(run: Callable[[ProgressFn], Awaitable[Any]]) -> AsyncIterator[bytes]:
-    """执行 run(emit)，将进度与最终结果打成 NDJSON 行（供 ?stream=1）。"""
+    """执行 run(emit)，将进度与最终结果打成 NDJSON 行（供 ?stream=1）。
 
-    q: asyncio.Queue = asyncio.Queue(maxsize=128)
+    进度队列必须无界：润色/重写等场景会按 token 高频 emit；若使用有界 Queue，
+    而下游因 TCP 反压在 yield 上阻塞，worker 会在 put 上永久等待，形成死锁，
+    前端表现为连接挂起、既收不到 result 也收不到 error。
+    """
+
+    q: asyncio.Queue = asyncio.Queue()
 
     async def emit(stage: str, message: str = "") -> None:
         await q.put(("p", {"type": "progress", "stage": stage, "message": message}))
@@ -471,7 +476,9 @@ def create_app(
             logger.info("[生成大纲] start project=%s total_chapters=%s", project_id, state.get("total_chapters"))
             await emit("plan_outline", "正在生成全书结构化大纲（LLM，可能需数分钟）…")
             try:
-                out = await plan_outline_node(state, llm=tp, rag_indexer=rag_indexer)
+                out = await plan_outline_node(
+                    state, llm=tp, rag_indexer=rag_indexer, on_progress=emit
+                )
             except Exception as exc:
                 raise_llm_http_error(exc, scene="生成大纲")
                 raise

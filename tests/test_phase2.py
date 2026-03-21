@@ -3,6 +3,8 @@
 运行：py tests/test_phase2.py  或  py -m pytest tests/test_phase2.py -v
 """
 import asyncio
+import json
+import re
 import shutil
 import sys
 import uuid
@@ -31,9 +33,24 @@ class FakePlannerLLM:
             return _Resp(
                 '{"plot_ideas":["候选剧情A：在边陲城市成长的少女卷入王权阴谋。","候选剧情B：失忆机械师在废土寻找记忆与真相。"]}'
             )
-        return _Resp(
-            '{"volumes":[{"volume_title":"第一卷 迷雾初启","chapters":[{"title":"第一章 雨夜来信","points":["主角收到神秘来信","踏入旧城区调查","发现组织追踪线索"]}]}]}'
-        )
+        if "【plan_outline_expand_batch】" in prompt:
+            m = re.search(r"本批 global_index 列表：([\d,]+)", prompt)
+            raw = (m.group(1) if m else "").strip()
+            indices = [int(x) for x in raw.split(",") if x.strip().isdigit()]
+            chapters = [{"global_index": g, "points": [f"a-{g}", f"b-{g}", f"c-{g}"]} for g in indices]
+            return _Resp(json.dumps({"chapters": chapters}, ensure_ascii=False))
+        if "【plan_outline_skeleton】" in prompt:
+            m = re.search(r"目标章节数[：:]\s*(\d+)", prompt)
+            n = int(m.group(1)) if m else 12
+            chs = [{"title": f"第{i + 1}章", "beat": f"beat{i}", "points": []} for i in range(n)]
+            return _Resp(
+                json.dumps({"volumes": [{"volume_title": "第一卷", "chapters": chs}]}, ensure_ascii=False)
+            )
+        if "【plan_outline_single】" in prompt:
+            return _Resp(
+                '{"volumes":[{"volume_title":"第一卷 迷雾初启","chapters":[{"title":"第一章 雨夜来信","points":["主角收到神秘来信","踏入旧城区调查","发现组织追踪线索"]}]}]}'
+            )
+        return _Resp("{}")
 
 
 class FakeWriterLLM:
@@ -62,6 +79,35 @@ def test_plan_outline():
     assert len(structure["volumes"]) >= 1
     assert len(structure["volumes"][0]["chapters"]) >= 1
     assert len(structure["volumes"][0]["chapters"][0]["points"]) >= 1
+    assert outline_structure_to_string(structure)
+
+
+def test_plan_outline_multi_phase_batches_and_rag():
+    from graph.nodes import plan_outline as po
+    from graph.nodes.plan_outline import plan_outline_node
+    from state import outline_structure_to_string
+
+    n = po.PLAN_OUTLINE_SINGLE_CALL_MAX + 5
+    state = {"selected_plot_summary": "长篇回归", "total_chapters": n, "project_id": "p-mphase"}
+
+    class _Idx:
+        def __init__(self) -> None:
+            self.outline_chunks = 0
+
+        def add_outline_chunk(self, *_a, **_kw) -> None:
+            self.outline_chunks += 1
+
+    idx = _Idx()
+    out = asyncio.run(plan_outline_node(state, llm=FakePlannerLLM(), rag_indexer=idx))
+    structure = out["outline_structure"]
+    total = 0
+    for vol in structure["volumes"]:
+        total += len(vol.get("chapters") or [])
+    assert total == n
+    for vol in structure["volumes"]:
+        for ch in vol.get("chapters") or []:
+            assert isinstance(ch.get("points"), list) and len(ch["points"]) >= 1
+    assert idx.outline_chunks == n
     assert outline_structure_to_string(structure)
 
 
@@ -139,6 +185,7 @@ def test_workflow_runs_and_checkpoint_available():
 def run_all():
     test_generate_plot_ideas()
     test_plan_outline()
+    test_plan_outline_multi_phase_batches_and_rag()
     test_write_and_refine_chapter()
     test_workflow_runs_and_checkpoint_available()
     print("Phase 2 acceptance: all passed.")

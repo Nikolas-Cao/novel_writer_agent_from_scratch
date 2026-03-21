@@ -1,10 +1,16 @@
 """
 阶段 2 节点：根据 selected_plot_summary 生成结构化大纲。
 若传入 rag_indexer 且 state 有 project_id，会将每章大纲片段写入 RAG，供 write_chapter 检索。
+
+章节数较多时采用「骨架 + 分批扩写 points」多轮 LLM，降低单次输出长度与 JSON 失败率；
+章节数 ≤ PLAN_OUTLINE_SINGLE_CALL_MAX 时仍用单次调用。
 """
+from __future__ import annotations
+
 import logging
+import os
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -13,11 +19,273 @@ from graph.utils import extract_json_object, invoke_and_parse_with_retry
 from rag import LocalRagIndexer
 from state import NovelProjectState, outline_structure_to_string
 
+# 超过该章节数则走骨架 + 分批扩写（避免单次 JSON 过大）
+PLAN_OUTLINE_SINGLE_CALL_MAX = int(os.environ.get("PLAN_OUTLINE_SINGLE_CALL_MAX", "16"))
+# 每批扩写的章节数
+PLAN_OUTLINE_BATCH_SIZE = max(1, int(os.environ.get("PLAN_OUTLINE_BATCH_SIZE", "10")))
+# 超过该章节数则每章要点条数降为 2~3
+PLAN_OUTLINE_LARGE_BOOK_CHAPTERS = int(os.environ.get("PLAN_OUTLINE_LARGE_BOOK_CHAPTERS", "40"))
+
+ProgressCallback = Optional[Callable[[str, str], Awaitable[None]]]
+
+
+def _points_range(total_chapters: int) -> Tuple[int, int]:
+    if total_chapters >= PLAN_OUTLINE_LARGE_BOOK_CHAPTERS:
+        return 2, 3
+    return 3, 5
+
+
+def _count_chapters(outline_structure: Dict[str, Any]) -> int:
+    n = 0
+    for volume in outline_structure.get("volumes") or []:
+        if not isinstance(volume, dict):
+            continue
+        n += len(volume.get("chapters") or [])
+    return n
+
+
+def _flatten_chapter_refs(outline_structure: Dict[str, Any]) -> List[Tuple[int, int, Dict[str, Any]]]:
+    """(volume_idx, chapter_idx_in_volume, chapter_dict) 按阅读顺序。"""
+    refs: List[Tuple[int, int, Dict[str, Any]]] = []
+    for vol_idx, volume in enumerate(outline_structure.get("volumes") or []):
+        if not isinstance(volume, dict):
+            continue
+        for ch_idx, ch in enumerate(volume.get("chapters") or []):
+            if isinstance(ch, dict):
+                refs.append((vol_idx, ch_idx, ch))
+    return refs
+
+
+def _normalize_skeleton_chapter_count(
+    outline_structure: Dict[str, Any], total_chapters: int
+) -> None:
+    """将骨架章节数对齐到 total_chapters（多删少补）。"""
+    refs = _flatten_chapter_refs(outline_structure)
+    current = len(refs)
+    if current == total_chapters:
+        return
+    logger.warning(
+        "[plan_outline] skeleton chapter count mismatch: got %s want %s, normalizing",
+        current,
+        total_chapters,
+    )
+    if current > total_chapters:
+        to_drop = current - total_chapters
+        # 从最后一卷最后一章向前删
+        for _ in range(to_drop):
+            vols = outline_structure.get("volumes") or []
+            if not vols:
+                break
+            last_vol = vols[-1]
+            if not isinstance(last_vol, dict):
+                vols.pop()
+                continue
+            chs = last_vol.get("chapters") or []
+            if chs:
+                chs.pop()
+                last_vol["chapters"] = chs
+            else:
+                vols.pop()
+        return
+    # current < total_chapters：在最后一卷末尾补章
+    need = total_chapters - current
+    vols = outline_structure.get("volumes") or []
+    if not vols:
+        outline_structure["volumes"] = [{"volume_title": "第一卷", "chapters": []}]
+        vols = outline_structure["volumes"]
+    last_vol = vols[-1]
+    if not isinstance(last_vol, dict):
+        last_vol = {"volume_title": "补充卷", "chapters": []}
+        vols[-1] = last_vol
+    chs = last_vol.setdefault("chapters", [])
+    start_idx = current
+    for j in range(need):
+        chs.append(
+            {
+                "title": f"第{start_idx + j + 1}章",
+                "beat": "待模型补全结构时自动添加的占位节拍。",
+                "points": ["（待扩写）"],
+            }
+        )
+
+
+def _single_call_prompt(selected_plot_summary: str, total_chapters: int) -> str:
+    lo, hi = _points_range(total_chapters)
+    return (
+        "你是一名长篇小说策划。【plan_outline_single】请根据给定剧情概要生成全书结构化大纲。\n"
+        "输出要求：\n"
+        "1) 至少一卷，章节总数尽量接近目标章节数；\n"
+        f"2) 每章含 title 与 points（{lo}~{hi}条）；\n"
+        "3) 仅输出 JSON，不要解释。\n"
+        "JSON 格式：\n"
+        '{"volumes":[{"volume_title":"卷名","chapters":[{"title":"章名","points":["要点1","要点2"]}]}]}\n\n'
+        f"目标章节数：{total_chapters}\n"
+        f"剧情概要：{selected_plot_summary}"
+    )
+
+
+def _skeleton_prompt(selected_plot_summary: str, total_chapters: int) -> str:
+    return (
+        "你是一名长篇小说策划。【plan_outline_skeleton】请根据剧情概要生成全书结构骨架（不写每章详细要点）。\n"
+        "输出要求：\n"
+        "1) 至少一卷；章节总数必须等于目标章节数；\n"
+        "2) 每章仅含 title 与 beat（一句剧情走向/节拍，15~40 字）；不要写 points 或写空数组 []；\n"
+        "3) 仅输出 JSON，不要解释。\n"
+        "JSON 格式：\n"
+        '{"volumes":[{"volume_title":"卷名","chapters":[{"title":"章名","beat":"一句节拍"}]}]}\n\n'
+        f"目标章节数：{total_chapters}\n"
+        f"剧情概要：{selected_plot_summary}"
+    )
+
+
+def _ensure_placeholder_points(ch: Dict[str, Any]) -> None:
+    pts = ch.get("points")
+    if not isinstance(pts, list) or len(pts) == 0:
+        ch["points"] = ["（待扩写）"]
+
+
+def _prepare_skeleton_structure(obj: Dict[str, Any], total_chapters: int) -> Dict[str, Any]:
+    outline_structure: Dict[str, Any] = {"volumes": list(obj.get("volumes", []))}
+    _normalize_skeleton_chapter_count(outline_structure, total_chapters)
+    for _v, _c, ch in _flatten_chapter_refs(outline_structure):
+        _ensure_placeholder_points(ch)
+        ch.pop("one_liner", None)
+    return outline_structure
+
+
+def _batch_indices_line(indices: List[int]) -> str:
+    return ",".join(str(i) for i in indices)
+
+
+def _expand_batch_prompt(
+    selected_plot_summary: str,
+    total_chapters: int,
+    batch_global_indices: List[int],
+    chapter_rows: List[str],
+    prev_carry: str,
+    lo: int,
+    hi: int,
+) -> str:
+    rows = "\n".join(chapter_rows)
+    carry = prev_carry.strip() if prev_carry.strip() else "（无，本批为开篇）"
+    return (
+        "你是一名长篇小说策划。【plan_outline_expand_batch】请为下列章节扩写详细要点（承接上一批结尾，勿重复已交代信息）。\n"
+        "输出要求：\n"
+        f"1) 仅输出 JSON；每章 points 含 {lo}~{hi} 条，具体、可指导写作；\n"
+        '2) JSON 格式：{{"chapters":[{{"global_index":0,"points":["..."]}},...]}}；\n'
+        "3) chapters 必须覆盖本批全部 global_index，顺序不限但不可遗漏。\n\n"
+        f"全书目标章节数：{total_chapters}\n"
+        f"剧情概要：{selected_plot_summary}\n"
+        f"上一批衔接摘要：{carry}\n"
+        "本批章节（global_index | 标题 | 节拍）：\n"
+        f"{rows}\n"
+        f"本批 global_index 列表：{_batch_indices_line(batch_global_indices)}"
+    )
+
+
+def _parse_expand_batch(
+    data: Dict[str, Any], expected_indices: List[int]
+) -> Dict[int, List[str]]:
+    out: Dict[int, List[str]] = {}
+    for item in data.get("chapters") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            g = int(item.get("global_index", -1))
+        except (TypeError, ValueError):
+            continue
+        pts = item.get("points")
+        if isinstance(pts, list) and pts:
+            out[g] = [str(p).strip() for p in pts if str(p).strip()]
+    missing = [i for i in expected_indices if i not in out or not out[i]]
+    if missing:
+        raise ValueError(f"expand_batch missing chapters: {missing}")
+    return out
+
+
+def _carry_forward_from_points(points: List[str]) -> str:
+    if not points:
+        return ""
+    tail = points[-3:]
+    return "；".join(tail)[:800]
+
+
+def _fallback_points_from_chapter(ch: Dict[str, Any], min_len: int) -> List[str]:
+    beat = (ch.get("beat") or ch.get("one_liner") or "").strip()
+    title = (ch.get("title") or "").strip()
+    if beat:
+        return [beat] if min_len <= 1 else [beat, f"围绕「{title or '本章'}」推进情节。"]
+    return [f"围绕「{title or '本章'}」展开剧情。"]
+
+
+async def _expand_batches(
+    planner: Any,
+    selected_plot_summary: str,
+    total_chapters: int,
+    outline_structure: Dict[str, Any],
+    project_id: str,
+    on_progress: ProgressCallback,
+    lo: int,
+    hi: int,
+) -> None:
+    refs = _flatten_chapter_refs(outline_structure)
+    batch_size = PLAN_OUTLINE_BATCH_SIZE
+    prev_carry = ""
+
+    for start in range(0, len(refs), batch_size):
+        batch = refs[start : start + batch_size]
+        indices = [start + k for k in range(len(batch))]
+        chapter_rows = []
+        for k, (_vi, _ci, ch) in enumerate(batch):
+            g = indices[k]
+            title = (ch.get("title") or f"第{g + 1}章").strip()
+            beat = (ch.get("beat") or "").strip()
+            chapter_rows.append(f"{g}|{title}|{beat}")
+        prompt = _expand_batch_prompt(
+            selected_plot_summary,
+            total_chapters,
+            indices,
+            chapter_rows,
+            prev_carry,
+            lo,
+            hi,
+        )
+        logger.info(
+            "[plan_outline] expand_batch project=%s range=%s..%s",
+            project_id,
+            indices[0],
+            indices[-1],
+        )
+        if on_progress:
+            await on_progress(
+                "plan_outline",
+                f"正在扩写大纲要点 {indices[-1] + 1}/{len(refs)} 章（本批 {len(indices)} 章）…",
+            )
+        try:
+            data = await invoke_and_parse_with_retry(
+                planner, prompt, extract_json_object, max_retries=3
+            )
+            by_idx = _parse_expand_batch(data, indices)
+        except Exception as exc:
+            logger.warning("[plan_outline] expand_batch failed, using fallback: %s", exc)
+            by_idx = {}
+            for g, (_vi, _ci, ch) in zip(indices, batch):
+                by_idx[g] = _fallback_points_from_chapter(ch, lo)
+
+        for g, (_vi, _ci, ch) in zip(indices, batch):
+            pts = by_idx.get(g) or _fallback_points_from_chapter(ch, lo)
+            ch["points"] = pts
+
+        last_g = indices[-1]
+        last_ch = batch[-1][2]
+        prev_carry = _carry_forward_from_points(last_ch.get("points") or [])
+
 
 async def plan_outline_node(
     state: NovelProjectState,
     llm: Optional[Any] = None,
     rag_indexer: Optional[LocalRagIndexer] = None,
+    on_progress: ProgressCallback = None,
 ) -> Dict[str, Any]:
     planner = llm or create_planner_llm()
     selected_plot_summary = state.get("selected_plot_summary", "").strip()
@@ -25,28 +293,54 @@ async def plan_outline_node(
     if total_chapters <= 0:
         total_chapters = 12
 
-    prompt = (
-        "你是一名长篇小说策划，请根据给定剧情概要生成全书结构化大纲。\n"
-        "输出要求：\n"
-        "1) 至少一卷，章节总数尽量接近目标章节数；\n"
-        "2) 每章含 title 与 points（3~5条）；\n"
-        "3) 仅输出 JSON，不要解释。\n"
-        "JSON 格式：\n"
-        '{"volumes":[{"volume_title":"卷名","chapters":[{"title":"章名","points":["要点1","要点2"]}]}]}\n\n'
-        f"目标章节数：{total_chapters}\n"
-        f"剧情概要：{selected_plot_summary}"
-    )
     project_id = (state.get("project_id") or "").strip() or "(no_project)"
     t0 = time.monotonic()
-    logger.info(
-        "[plan_outline] llm_invoke_begin project=%s target_chapters=%s",
-        project_id,
-        total_chapters,
-    )
-    obj = await invoke_and_parse_with_retry(
-        planner, prompt, extract_json_object, max_retries=3
-    )
-    outline_structure = {"volumes": obj.get("volumes", [])}
+    lo, hi = _points_range(total_chapters)
+
+    if total_chapters <= PLAN_OUTLINE_SINGLE_CALL_MAX:
+        prompt = _single_call_prompt(selected_plot_summary, total_chapters)
+        logger.info(
+            "[plan_outline] single_call_begin project=%s target_chapters=%s",
+            project_id,
+            total_chapters,
+        )
+        obj = await invoke_and_parse_with_retry(
+            planner, prompt, extract_json_object, max_retries=3
+        )
+        outline_structure = {"volumes": obj.get("volumes", [])}
+    else:
+        logger.info(
+            "[plan_outline] multi_phase_begin project=%s target_chapters=%s batch_size=%s",
+            project_id,
+            total_chapters,
+            PLAN_OUTLINE_BATCH_SIZE,
+        )
+        if on_progress:
+            await on_progress(
+                "plan_outline",
+                f"正在生成全书结构骨架（{total_chapters} 章，分阶段扩写）…",
+            )
+        skel = await invoke_and_parse_with_retry(
+            planner,
+            _skeleton_prompt(selected_plot_summary, total_chapters),
+            extract_json_object,
+            max_retries=3,
+        )
+        outline_structure = _prepare_skeleton_structure(skel, total_chapters)
+        await _expand_batches(
+            planner,
+            selected_plot_summary,
+            total_chapters,
+            outline_structure,
+            project_id,
+            on_progress,
+            lo,
+            hi,
+        )
+        for _v, _c, ch in _flatten_chapter_refs(outline_structure):
+            pts = ch.get("points")
+            if not isinstance(pts, list) or not pts or pts == ["（待扩写）"]:
+                ch["points"] = _fallback_points_from_chapter(ch, lo)
 
     # 若有 project_id 与 rag_indexer，将每章大纲片段写入 RAG，供 write_chapter 的 retriever 使用
     if project_id and project_id != "(no_project)" and rag_indexer is not None and outline_structure.get("volumes"):

@@ -37,6 +37,9 @@ copy .env-sample .env
 - `DEFAULT_TOTAL_CHAPTERS`：默认目标章节数（默认 100）
 - `PLOT_IDEAS_COUNT`：生成剧情概要候选数量（默认 5）
 - `RAG_PREVIOUS_CHAPTERS`：写章时检索前文章节摘要数量（默认 5）
+- `PLAN_OUTLINE_SINGLE_CALL_MAX`：超过该章节数则大纲改为「骨架 + 分批扩写」多轮 LLM（默认 16）
+- `PLAN_OUTLINE_BATCH_SIZE`：大纲分批扩写时每批章节数（默认 10）
+- `PLAN_OUTLINE_LARGE_BOOK_CHAPTERS`：达到该章节数后每章要点条数降为 2～3（默认 40）
 
 </details>
 
@@ -61,7 +64,7 @@ python -m uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 你不需要单独“启动/构建前端”。只要后端已运行，就可以直接在浏览器中使用 UI：
 
 - 新建项目：输入创作意图 → 点击 `生成概要`
-- 选概要并生成大纲：选择候选/填写自定义 → 点击 `生成大纲`
+- 选概要并生成大纲：选择候选/填写自定义 → 点击 `生成大纲`（章数较多时会多轮调用模型，耗时更长但输出更稳；`?stream=1` 时可见分阶段进度）
 - 逐章创作：点击 `续写下一章`（如需修改再对“最新章”做反馈重写）
 
 如果你想用 Live Server 直接打开 `frontend/index.html`（仅开发调试更方便），注意 `index.html` 里只有在端口为 `5500` 时才会把 API 指向后端 `http://127.0.0.1:8000`，因此推荐用 `5500` 端口运行 Live Server。
@@ -76,4 +79,5 @@ python -m uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 3. 插图管线的工程化：`enable_chapter_illustrations` 目前是可选分支；可以进一步做图片缓存去重、失败兜底策略（例如联网失败时直接使用离线生成或返回占位）。
 4. 更稳的并发与任务控制：当前按钮禁用依赖前端请求 pending；可在后端加上“同一 `project_id` 的写操作互斥锁/队列”，避免同时触发导致状态写回顺序问题。
 5. 加强回归用例覆盖：现有 Playwright 已覆盖首页控件、按钮可见性与 stream NDJSON 消费等关键点；下一步可以补 `回滚 tail` 删除行为、`rewrite` 可选更新大纲路径、插图 enable 分支的 UI/后端接口联动回归（仍建议尽量避免依赖真实 LLM）。
+6. 流式 NDJSON 背压：`?stream=1` 下 token 级进度极高频，后端 `ndjson_with_progress` 已用无界队列避免与慢客户端之间的死锁；若仍见“卡住”，可抓浏览器 Network 是否仍在收字节、后端日志是否停在某一 LLM 步骤。
 
