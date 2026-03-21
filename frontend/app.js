@@ -263,6 +263,8 @@ const state = {
   currentChapterCharacterGraph: null,
   isGeneratingOutline: false,
   isChapterWriteInProgress: false,
+  /** 用于防止 openChapter 的请求乱序覆盖 UI */
+  openChapterRequestSeq: 0,
 };
 
 const el = {
@@ -473,6 +475,35 @@ function adjustChapterViewHeight() {
     return;
   }
   el.chapterView.style.height = "";
+}
+
+function setChapterNavigationLocked(locked) {
+  // 只锁“章节切换入口”，保留脚本内部 openChapter 的能力（脚本会在锁定期间主动调用 openChapter）
+  if (el.chapterList) {
+    el.chapterList.style.pointerEvents = locked ? "none" : "";
+    el.chapterList.style.opacity = locked ? "0.6" : "";
+  }
+  if (el.outlineView) {
+    el.outlineView.style.pointerEvents = locked ? "none" : "";
+    el.outlineView.style.opacity = locked ? "0.75" : "";
+  }
+}
+
+function setGlobalInteractionLocked(locked) {
+  // 锁定项目级入口，避免在章节生成链路中切换项目导致状态错配。
+  if (el.projectList) {
+    el.projectList.style.pointerEvents = locked ? "none" : "";
+    el.projectList.style.opacity = locked ? "0.6" : "";
+  }
+  const targets = [
+    el.btnRefreshProjects,
+    el.btnNewProject,
+    el.btnGenerateIdeas,
+    el.btnGenerateOutline,
+  ];
+  targets.forEach((node) => {
+    if (node) node.disabled = Boolean(locked);
+  });
 }
 
 function setStatus(msg) {
@@ -937,17 +968,27 @@ function highlightSelectedChapterInList(index) {
 
 async function openChapter(index) {
   if (!state.currentProjectId) return;
+  const projectIdAtRequest = state.currentProjectId;
+  const requestedIndex = index;
+  const reqSeq = (state.openChapterRequestSeq += 1);
+
   state.selectedChapterIndex = index;
   updateChapterActionButtons();
   highlightSelectedChapterInList(index);
   scrollToOutlineChapter(index);
   setStatus(`加载第 ${index + 1} 章...`);
   try {
-    const data = await api.get(`/projects/${state.currentProjectId}/chapters/${index}`);
+    const data = await api.get(`/projects/${projectIdAtRequest}/chapters/${requestedIndex}`);
+    // 丢弃旧请求：防止用户快速切换/后台生成结束后返回覆盖当前展示
+    if (reqSeq !== state.openChapterRequestSeq) return;
+    if (state.currentProjectId !== projectIdAtRequest) return;
+    if (state.selectedChapterIndex !== requestedIndex) return;
+
     el.chapterView.innerHTML = renderMarkdown(data.content || "");
     adjustChapterViewHeight();
-    setStatus(`已加载第 ${index + 1} 章`);
+    setStatus(`已加载第 ${requestedIndex + 1} 章`);
   } catch (e) {
+    if (reqSeq !== state.openChapterRequestSeq) return;
     setStatus(`加载章节失败：${e.message}`);
   }
 }
@@ -1098,6 +1139,8 @@ async function writeNextChapter() {
   setStatus("续写下一章中...");
   state.isChapterWriteInProgress = true;
   updateChapterActionButtons();
+  setChapterNavigationLocked(true);
+  setGlobalInteractionLocked(true);
   try {
     const { onProgress, flushNow } = createChapterStreamProgressHandler("refine_chapter_stream");
     if (el.chapterView) {
@@ -1117,6 +1160,8 @@ async function writeNextChapter() {
   } finally {
     state.isChapterWriteInProgress = false;
     updateChapterActionButtons();
+    setChapterNavigationLocked(false);
+    setGlobalInteractionLocked(false);
   }
 }
 
@@ -1136,6 +1181,10 @@ async function rollbackTailFromSelectedChapter() {
   if (!confirmed) return;
 
   setStatus(`回滚到第 ${chapterNo} 章中...`);
+  state.isChapterWriteInProgress = true;
+  updateChapterActionButtons();
+  setChapterNavigationLocked(true);
+  setGlobalInteractionLocked(true);
   try {
     const data = await api.delete(
       `/projects/${state.currentProjectId}/chapters/${state.selectedChapterIndex}/tail`
@@ -1145,6 +1194,11 @@ async function rollbackTailFromSelectedChapter() {
     setStatus(`回滚完成：已删除 ${data.deleted_count} 章后续内容`);
   } catch (e) {
     setStatus(`回滚失败：${e.message}`);
+  } finally {
+    state.isChapterWriteInProgress = false;
+    updateChapterActionButtons();
+    setChapterNavigationLocked(false);
+    setGlobalInteractionLocked(false);
   }
 }
 
@@ -1165,6 +1219,8 @@ async function rewriteChapter() {
   setStatus("重写中...");
   state.isChapterWriteInProgress = true;
   updateChapterActionButtons();
+  setChapterNavigationLocked(true);
+  setGlobalInteractionLocked(true);
   try {
     const { onProgress, flushNow } = createChapterStreamProgressHandler("rewrite_feedback_stream");
     if (el.chapterView) {
@@ -1187,6 +1243,8 @@ async function rewriteChapter() {
   } finally {
     state.isChapterWriteInProgress = false;
     updateChapterActionButtons();
+    setChapterNavigationLocked(false);
+    setGlobalInteractionLocked(false);
   }
 }
 
@@ -1208,6 +1266,8 @@ async function regenerateCurrentChapter() {
   setStatus(`重新生成第 ${chapterNo} 章中...`);
   state.isChapterWriteInProgress = true;
   updateChapterActionButtons();
+  setChapterNavigationLocked(true);
+  setGlobalInteractionLocked(true);
   try {
     const { onProgress, flushNow } = createChapterStreamProgressHandler("refine_chapter_stream");
     if (el.chapterView) {
@@ -1227,6 +1287,8 @@ async function regenerateCurrentChapter() {
   } finally {
     state.isChapterWriteInProgress = false;
     updateChapterActionButtons();
+    setChapterNavigationLocked(false);
+    setGlobalInteractionLocked(false);
   }
 }
 
