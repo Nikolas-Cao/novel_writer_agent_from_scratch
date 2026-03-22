@@ -20,6 +20,10 @@ test.describe("Novel Writer Agent UI smoke", () => {
     await expect(illust).not.toBeChecked();
 
     await expect(page.locator("#project-list")).toBeVisible();
+
+    await expect(page.getByRole("heading", { name: "同人知识库" })).toBeVisible();
+    await expect(page.locator("#btn-create-kb")).toBeVisible();
+    await expect(page.locator("#btn-refresh-kb")).toBeVisible();
   });
 
   test("刷新项目列表不会报错（需要后端已启动）", async ({ page }) => {

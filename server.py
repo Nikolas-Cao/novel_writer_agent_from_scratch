@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -32,9 +32,15 @@ from graph.nodes.post_chapter import post_chapter_node
 from graph.nodes.refine_chapter import refine_chapter_node
 from graph.nodes.rewrite_feedback import rewrite_with_feedback_node
 from graph.nodes.update_outline import update_outline_from_feedback_node
+from graph.knowledge_context import build_kb_context_for_outline
 from graph.nodes.write_chapter import write_chapter_node
+from knowledge_base.assets_builder import build_assets_task
+from knowledge_base.ingest import IngestCancelled, run_document_ingest
+from knowledge_base.store import KnowledgeBaseStore
 from memory import LocalFileCheckpointer
 from rag import LocalRagIndexer, LocalRagRetriever
+from rag.global_kb_chroma import GlobalKbChroma
+from rag.global_kb_retriever import GlobalKbRetriever
 from storage import ChapterStore, CharacterGraphStore
 
 logger = logging.getLogger(__name__)
@@ -99,6 +105,15 @@ class CreateProjectRequest(BaseModel):
     total_chapters: Optional[int] = None
     chapter_word_target: Optional[int] = None
     enable_chapter_illustrations: Optional[bool] = None
+    selected_kb_ids: Optional[List[str]] = None
+
+
+class PatchProjectKnowledgeRequest(BaseModel):
+    selected_kb_ids: List[str] = Field(default_factory=list)
+
+
+class CreateKnowledgeBaseRequest(BaseModel):
+    name: str = Field(..., min_length=1)
 
 
 class PlotIdeasRequest(BaseModel):
@@ -151,6 +166,13 @@ def _default_state(project_id: str) -> Dict[str, Any]:
         # 因此这里用 0 表示“未持久化创建时间”。
         "created_at": 0,
         "token_usage": {},
+        "selected_kb_ids": [],
+        "kb_enabled": False,
+        "canon_overrides": [],
+        "consistency_report": None,
+        "kb_assets_text": "",
+        "kb_evidence_text": "",
+        "kb_confidence": None,
     }
 
 
@@ -210,6 +232,150 @@ def create_app(
     rag_retriever = LocalRagRetriever(root=vector_dir)
     checkpointer = LocalFileCheckpointer(root=states_dir)
 
+    kb_store = KnowledgeBaseStore(vector_dir)
+    global_kb_retriever = GlobalKbRetriever(vector_dir, kb_store)
+    kb_chroma = GlobalKbChroma(vector_dir)
+    _kb_cancel_events: Dict[str, asyncio.Event] = {}
+    _kb_background_tasks: Dict[str, asyncio.Task] = {}
+
+    def _kb_cancel_key(kb_id: str, job_id: str) -> str:
+        return f"{kb_id}:{job_id}"
+
+    def _project_has_outline(state: Dict[str, Any]) -> bool:
+        outline_structure = state.get("outline_structure") or {}
+        if (outline_structure.get("volumes") or []):
+            return True
+        return bool((state.get("outline") or "").strip())
+
+    async def _kb_document_pipeline(kb_id: str, doc_id: str, job_id: str, raw_path: Path) -> None:
+        key = _kb_cancel_key(kb_id, job_id)
+        ev = _kb_cancel_events.setdefault(key, asyncio.Event())
+        ev.clear()
+        try:
+            kb_store.save_job(
+                kb_id,
+                {
+                    "job_id": job_id,
+                    "kb_id": kb_id,
+                    "doc_id": doc_id,
+                    "status": "indexing",
+                    "byte_offset": 0,
+                    "processed_chunks": 0,
+                    "next_chunk_seq": 0,
+                    "error_message": None,
+                    "cancel_requested": False,
+                },
+            )
+            kb_store.upsert_document_record(
+                kb_id,
+                {
+                    **(kb_store.get_document(kb_id, doc_id) or {"doc_id": doc_id}),
+                    "doc_id": doc_id,
+                    "status": "indexing",
+                    "job_id": job_id,
+                },
+            )
+            fts_db = kb_store.kb_dir(kb_id) / "search.sqlite"
+            stats = await run_document_ingest(
+                kb_id=kb_id,
+                doc_id=doc_id,
+                raw_path=raw_path,
+                store=kb_store,
+                chroma=kb_chroma,
+                fts_db=fts_db,
+                job_id=job_id,
+                cancel_check=lambda: ev.is_set(),
+            )
+            n_chunks = int(stats.get("chunks") or 0)
+            kb_store.save_job(
+                kb_id,
+                {
+                    "job_id": job_id,
+                    "kb_id": kb_id,
+                    "doc_id": doc_id,
+                    "status": "summarizing_assets",
+                    "processed_chunks": n_chunks,
+                    "error_message": None,
+                    "cancel_requested": False,
+                },
+            )
+            assets = await build_assets_task(
+                raw_path,
+                planner,
+                cancel_check=lambda: ev.is_set(),
+            )
+            kb_store.save_assets_doc(kb_id, doc_id, assets)
+            kb_store.upsert_document_record(
+                kb_id,
+                {
+                    **(kb_store.get_document(kb_id, doc_id) or {"doc_id": doc_id}),
+                    "doc_id": doc_id,
+                    "status": "ready",
+                    "job_id": job_id,
+                    "chunks": n_chunks,
+                },
+            )
+            kb_store.save_job(
+                kb_id,
+                {
+                    "job_id": job_id,
+                    "kb_id": kb_id,
+                    "doc_id": doc_id,
+                    "status": "ready",
+                    "processed_chunks": n_chunks,
+                    "error_message": None,
+                    "cancel_requested": False,
+                },
+            )
+            kb_store.update_base_meta(kb_id, status="ready")
+        except IngestCancelled:
+            kb_store.save_job(
+                kb_id,
+                {
+                    "job_id": job_id,
+                    "kb_id": kb_id,
+                    "doc_id": doc_id,
+                    "status": "cancelled",
+                    "error_message": "cancelled",
+                    "cancel_requested": True,
+                },
+            )
+            kb_store.upsert_document_record(
+                kb_id,
+                {
+                    **(kb_store.get_document(kb_id, doc_id) or {"doc_id": doc_id}),
+                    "doc_id": doc_id,
+                    "status": "cancelled",
+                    "job_id": job_id,
+                },
+            )
+        except Exception as exc:
+            logger.exception("kb pipeline failed kb=%s doc=%s", kb_id, doc_id)
+            kb_store.save_job(
+                kb_id,
+                {
+                    "job_id": job_id,
+                    "kb_id": kb_id,
+                    "doc_id": doc_id,
+                    "status": "failed",
+                    "error_message": str(exc),
+                },
+            )
+            kb_store.upsert_document_record(
+                kb_id,
+                {
+                    **(kb_store.get_document(kb_id, doc_id) or {"doc_id": doc_id}),
+                    "doc_id": doc_id,
+                    "status": "failed",
+                    "job_id": job_id,
+                    "error": str(exc),
+                },
+            )
+            kb_store.update_base_meta(kb_id, status="failed")
+        finally:
+            _kb_background_tasks.pop(key, None)
+            _kb_cancel_events.pop(key, None)
+
     def ensure_project(project_id: str) -> None:
         (projects_dir / project_id).mkdir(parents=True, exist_ok=True)
 
@@ -222,6 +388,10 @@ def create_app(
             data["project_id"] = project_id
         if "token_usage" not in data:
             data["token_usage"] = {}
+        defaults = _default_state(project_id)
+        for k, v in defaults.items():
+            if k not in data:
+                data[k] = v
         return data
 
     def save_state(project_id: str, state: Dict[str, Any]) -> None:
@@ -386,6 +556,8 @@ def create_app(
                 chapter_store=chapter_store,
                 rag_retriever=rag_retriever,
                 graph_store=graph_store,
+                global_kb_retriever=global_kb_retriever,
+                planner_llm=_p,
             )
             state.update(out)
             await _emit("refine_chapter", "正在润色本章（LLM）…")
@@ -429,6 +601,9 @@ def create_app(
             state["chapter_word_target"] = int(req.chapter_word_target)
         if req.enable_chapter_illustrations is not None:
             state["enable_chapter_illustrations"] = bool(req.enable_chapter_illustrations)
+        if req.selected_kb_ids is not None:
+            state["selected_kb_ids"] = list(req.selected_kb_ids)
+            state["kb_enabled"] = bool(state["selected_kb_ids"])
         save_state(project_id, state)
         return {"project_id": project_id}
 
@@ -454,6 +629,9 @@ def create_app(
             "enable_chapter_illustrations": state.get("enable_chapter_illustrations", False),
             "created_at": _project_created_ts(project_id, state),
             "token_usage": state.get("token_usage") or {},
+            "selected_kb_ids": state.get("selected_kb_ids") or [],
+            "kb_enabled": bool(state.get("kb_enabled")),
+            "canon_overrides": state.get("canon_overrides") or [],
         }
 
     @app.post("/projects/{project_id}/plot-ideas")
@@ -494,9 +672,20 @@ def create_app(
             tp, tw = _tracked(state)
             logger.info("[生成大纲] start project=%s total_chapters=%s", project_id, state.get("total_chapters"))
             await emit("plan_outline", "正在生成全书结构化大纲（LLM，可能需数分钟）…")
+            kb_context = ""
+            if state.get("kb_enabled") and state.get("selected_kb_ids"):
+                kb_context = await build_kb_context_for_outline(
+                    kb_ids=list(state.get("selected_kb_ids") or []),
+                    plot_summary=req.selected_plot_summary,
+                    retriever=global_kb_retriever,
+                )
             try:
                 out = await plan_outline_node(
-                    state, llm=tp, rag_indexer=rag_indexer, on_progress=emit
+                    state,
+                    llm=tp,
+                    rag_indexer=rag_indexer,
+                    on_progress=emit,
+                    kb_context=kb_context or None,
                 )
             except Exception as exc:
                 raise_llm_http_error(exc, scene="生成大纲")
@@ -509,6 +698,7 @@ def create_app(
             return {
                 "outline_structure": state.get("outline_structure", {"volumes": []}),
                 "outline": state.get("outline", ""),
+                "canon_overrides": state.get("canon_overrides") or [],
             }
 
         if stream:
@@ -796,6 +986,132 @@ def create_app(
         if stream:
             return StreamingResponse(ndjson_with_progress(_run_rewrite), media_type=NDJSON_MEDIA)
         return await _run_rewrite(_noop_progress)
+
+    @app.post("/knowledge-bases")
+    async def create_knowledge_base(req: CreateKnowledgeBaseRequest):
+        rec = kb_store.create_base(req.name)
+        return rec
+
+    @app.get("/knowledge-bases")
+    async def list_knowledge_bases():
+        bases = kb_store.list_bases()
+        enriched = []
+        for b in bases:
+            kid = b.get("kb_id")
+            if not kid:
+                continue
+            docs = kb_store.list_documents(str(kid))
+            enriched.append({**b, "documents": len(docs)})
+        return {"knowledge_bases": enriched}
+
+    @app.get("/knowledge-bases/{kb_id}")
+    async def get_knowledge_base(kb_id: str):
+        base = kb_store.get_base(kb_id)
+        if not base:
+            raise HTTPException(status_code=404, detail="knowledge base not found")
+        docs = kb_store.list_documents(kb_id)
+        return {**base, "documents": docs}
+
+    @app.post("/knowledge-bases/{kb_id}/documents")
+    async def upload_knowledge_document(kb_id: str, file: UploadFile = File(...)):
+        if not kb_store.get_base(kb_id):
+            raise HTTPException(status_code=404, detail="knowledge base not found")
+        suffix = Path(file.filename or "").suffix.lower()
+        if suffix not in (".txt", ".md"):
+            raise HTTPException(status_code=400, detail="仅支持上传 .txt 或 .md 文件")
+        doc_id = f"d-{uuid.uuid4().hex[:12]}"
+        job_id = f"j-{uuid.uuid4().hex[:10]}"
+        raw_dir = kb_store.kb_dir(kb_id) / "raw"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        dest = raw_dir / f"{doc_id}{suffix}"
+        data = await file.read()
+        dest.write_bytes(data)
+        kb_store.upsert_document_record(
+            kb_id,
+            {
+                "doc_id": doc_id,
+                "filename": file.filename or dest.name,
+                "status": "indexing",
+                "job_id": job_id,
+                "bytes": len(data),
+            },
+        )
+        kb_store.update_base_meta(kb_id, status="indexing")
+        key = _kb_cancel_key(kb_id, job_id)
+        task = asyncio.create_task(_kb_document_pipeline(kb_id, doc_id, job_id, dest))
+        _kb_background_tasks[key] = task
+        return {"doc_id": doc_id, "job_id": job_id, "status": "started"}
+
+    @app.get("/knowledge-bases/{kb_id}/documents")
+    async def list_knowledge_documents(kb_id: str):
+        if not kb_store.get_base(kb_id):
+            raise HTTPException(status_code=404, detail="knowledge base not found")
+        return {"documents": kb_store.list_documents(kb_id)}
+
+    @app.get("/knowledge-bases/{kb_id}/jobs/{job_id}")
+    async def get_knowledge_job(kb_id: str, job_id: str):
+        job = kb_store.load_job(kb_id, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="job not found")
+        return job
+
+    @app.post("/knowledge-bases/{kb_id}/jobs/{job_id}/cancel")
+    async def cancel_knowledge_job(kb_id: str, job_id: str):
+        key = _kb_cancel_key(kb_id, job_id)
+        ev = _kb_cancel_events.setdefault(key, asyncio.Event())
+        ev.set()
+        return {"ok": True, "job_id": job_id}
+
+    @app.post("/knowledge-bases/{kb_id}/documents/{doc_id}/rebuild")
+    async def rebuild_knowledge_document(kb_id: str, doc_id: str):
+        if not kb_store.get_base(kb_id):
+            raise HTTPException(status_code=404, detail="knowledge base not found")
+        doc = kb_store.get_document(kb_id, doc_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="document not found")
+        raw_dir = kb_store.kb_dir(kb_id) / "raw"
+        matches = list(raw_dir.glob(f"{doc_id}.*"))
+        if not matches:
+            raise HTTPException(status_code=404, detail="raw file not found")
+        raw_path = matches[0]
+        job_id = f"j-{uuid.uuid4().hex[:10]}"
+        kb_store.upsert_document_record(
+            kb_id,
+            {**doc, "doc_id": doc_id, "status": "indexing", "job_id": job_id},
+        )
+        key = _kb_cancel_key(kb_id, job_id)
+        task = asyncio.create_task(_kb_document_pipeline(kb_id, doc_id, job_id, raw_path))
+        _kb_background_tasks[key] = task
+        return {"doc_id": doc_id, "job_id": job_id, "status": "started"}
+
+    @app.get("/knowledge-bases/{kb_id}/assets/summary")
+    async def get_knowledge_assets_summary(kb_id: str, doc_id: Optional[str] = Query(None)):
+        if not kb_store.get_base(kb_id):
+            raise HTTPException(status_code=404, detail="knowledge base not found")
+        if doc_id:
+            data = kb_store.load_assets_doc(kb_id, doc_id)
+            return {"kb_id": kb_id, "doc_id": doc_id, "assets": data}
+        data = kb_store.load_assets(kb_id)
+        return {"kb_id": kb_id, "doc_id": None, "assets": data}
+
+    @app.patch("/projects/{project_id}/knowledge-bases")
+    async def patch_project_knowledge_bases(project_id: str, req: PatchProjectKnowledgeRequest):
+        if not project_exists(project_id):
+            raise HTTPException(status_code=404, detail="project not found")
+        state = load_state(project_id)
+        if _project_has_outline(state):
+            raise HTTPException(
+                status_code=400,
+                detail="已生成大纲后不可修改知识库绑定，请新建项目",
+            )
+        state["selected_kb_ids"] = list(req.selected_kb_ids or [])
+        state["kb_enabled"] = bool(state["selected_kb_ids"])
+        save_state(project_id, state)
+        return {
+            "project_id": project_id,
+            "selected_kb_ids": state["selected_kb_ids"],
+            "kb_enabled": state["kb_enabled"],
+        }
 
     return app
 

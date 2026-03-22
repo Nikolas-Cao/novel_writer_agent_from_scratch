@@ -1160,3 +1160,94 @@ button:disabled {
   background: #ffffff !important;
   border-bottom-color: #e5e7eb !important;
 }
+
+/* ----- 同人知识库 ----- */
+.kb-panel {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(15, 23, 42, 0.1);
+}
+
+.kb-panel h3 {
+  margin: 0 0 6px;
+  font-size: 14px;
+}
+
+.kb-hint {
+  margin: 0 0 10px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #475569;
+}
+
+.kb-create-row {
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.kb-create-row input {
+  flex: 1;
+  min-width: 120px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid #cbd5e1;
+}
+
+.kb-list {
+  max-height: 220px;
+  overflow: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.kb-item {
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.06);
+  font-size: 12px;
+}
+
+.kb-item-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.kb-id {
+  font-size: 10px;
+  color: #64748b;
+}
+
+.kb-bind-label {
+  font-size: 11px;
+  margin: 0;
+}
+
+.kb-docs {
+  font-size: 11px;
+  color: #64748b;
+  margin-top: 4px;
+}
+
+.kb-assets-panel {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(15, 23, 42, 0.12);
+}
+
+.kb-assets-view {
+  margin-top: 8px;
+  max-height: 200px;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.4;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

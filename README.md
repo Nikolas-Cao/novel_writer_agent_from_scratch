@@ -13,6 +13,7 @@
 - 从创作意图生成剧情概要与结构化大纲
 - 逐章续写/润色；最新章支持反馈重写
 - 结合本地 RAG 与人物图谱上下文保证连续性
+- **同人知识库（可选）**：上传全局 `.txt` / `.md` 原著参考，项目勾选绑定；写纲/写章/润色时注入检索上下文，**二创设定优先于原著**；大纲生成后绑定锁定
 
 
 ## 🛠️ 依赖安装与快速启动
@@ -47,6 +48,7 @@ copy .env-sample .env
 - `PLAN_OUTLINE_BATCH_SIZE`：大纲分批扩写时每批章节数（默认 10）
 - `PLAN_OUTLINE_LARGE_BOOK_CHAPTERS`：达到该章节数后每章要点条数降为 2～3（默认 40）
 - `PROJECTS_ROOT` / `CHECKPOINT_DIR` / `VECTOR_STORE_DIR`：本地落盘根路径（默认分别为仓库下 `projects/`、`checkpoints/`、`vector_store/`）。**章节与人物图谱等在 `projects/{project_id}/`，Chroma 向量库在 `vector_store/{project_id}/`，API 状态 JSON 在 `checkpoints/api_state/{project_id}.json`**，与 `docs/项目实现学习指南.md` 一致。
+- **全局知识库摄取与检索**：`KB_CHUNK_TARGET_CHARS` / `KB_CHUNK_OVERLAP_CHARS` / `KB_INGEST_BATCH_CHUNKS` / `KB_READ_BLOCK_BYTES` / `KB_MAX_CHUNKS_PER_DOCUMENT`；摘要资产 map-reduce：`KB_ASSET_LEAF_BATCH_CHARS` / `KB_ASSET_MAX_LEAF_WINDOWS`；检索：`KB_RETRIEVE_CHROMA_K` / `KB_RETRIEVE_FTS_K` / `KB_RETRIEVE_FINAL_K`；低置信度补查：`KB_TOOL_LOOP_MAX_CALLS`（详见 `config.py`）。
 
 </details>
 
@@ -57,6 +59,8 @@ copy .env-sample .env
 ```bash
 pip install -r requirements.txt
 ```
+
+（上传知识库文档使用 `multipart/form-data`，依赖已包含 `python-multipart`。）
 
 运行服务：
 
@@ -71,6 +75,7 @@ python -m uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 
 你不需要单独“启动/构建前端”。只要后端已运行，就可以直接在浏览器中使用 UI：
 
+- **（可选）同人知识库**：左侧「同人知识库」创建知识集、上传 `.txt`/`.md`；在**尚未生成大纲**的项目上勾选「绑定当前项目」（或在点击「生成概要」创建新项目前勾好，会随 `POST /projects` 一并提交）；生成大纲后绑定不可改
 - 新建项目：输入创作意图 → 点击 `生成概要`
 - 选概要并生成大纲：选择候选/填写自定义 → 点击 `生成大纲`（章数较多时会多轮调用模型，耗时更长但输出更稳；长耗时接口可带查询参数 **`stream=1` 或 `stream=true`**，返回 NDJSON 进度流，可见分阶段进度）
 - 逐章创作：点击 `续写下一章`（可选勾选 **「开启图片生成」**；如需修改再对“最新章”做反馈重写）

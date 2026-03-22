@@ -23,6 +23,26 @@
         <button type="button" id="btn-new-project">新建项目</button>
       </div>
       <ul id="project-list" class="list"></ul>
+      <div id="kb-panel" class="kb-panel">
+        <h3>同人知识库</h3>
+        <p class="kb-hint">支持 <code>.txt</code> / <code>.md</code>。勾选「绑定当前项目」后参与写纲与写章；生成大纲后绑定不可改。</p>
+        <div class="row">
+          <button type="button" id="btn-refresh-kb">刷新知识库</button>
+        </div>
+        <div class="row kb-create-row">
+          <input type="text" id="kb-new-name-input" placeholder="新知识集名称" />
+          <button type="button" id="btn-create-kb">创建知识集</button>
+        </div>
+        <ul id="kb-list" class="list kb-list"></ul>
+        <div id="kb-assets-panel" class="kb-assets-panel" hidden>
+          <label for="kb-assets-kb-select">查看知识摘要资产</label>
+          <div class="row">
+            <select id="kb-assets-kb-select"></select>
+            <button type="button" id="btn-load-kb-assets">加载摘要</button>
+          </div>
+          <pre id="kb-assets-view" class="kb-assets-view"></pre>
+        </div>
+      </div>
     </section>
 
     <section class="panel panel-create">

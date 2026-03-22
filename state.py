@@ -119,3 +119,11 @@ class NovelProjectState(TypedDict, total=False):
     illustration_assets: List[dict]
     token_usage: Optional[Dict[str, Dict[str, int]]]  # model -> { input_tokens, output_tokens }
     created_at: Optional[int]  # Unix 秒，创建时间
+    # 全局同人知识库（可选）
+    selected_kb_ids: List[str]
+    kb_enabled: bool
+    canon_overrides: List[Dict[str, Any]]  # 二创对原著的覆盖说明
+    consistency_report: Optional[List[Dict[str, Any]]]
+    kb_assets_text: str
+    kb_evidence_text: str
+    kb_confidence: Optional[float]

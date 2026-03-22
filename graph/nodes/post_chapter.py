@@ -112,9 +112,44 @@ async def post_chapter_node(
         chapter_index=current_idx,
         base_graph=base_graph,
     )
+
+    canon_overrides: List[Dict[str, Any]] = list(state.get("canon_overrides") or [])
+    consistency_report: List[Dict[str, Any]] = list(state.get("consistency_report") or [])
+    if state.get("kb_enabled"):
+        ovr_prompt = (
+            "阅读下列章节正文，若出现相对「通用原著知识」而言的新设定、改写或事实变更，"
+            "输出 JSON：{\"new_overrides\":[{\"subject\":\"\",\"original_fact\":\"\",\"fanfic_fact\":\"\","
+            '"effective_from_chapter":'
+            + str(int(current_idx))
+            + "}]}\n"
+            "若无新变更，new_overrides 为空数组。\n\n"
+            + chapter_text[:8000]
+        )
+        try:
+            obj = await invoke_and_parse_with_retry(
+                planner, ovr_prompt, extract_json_object, max_retries=2
+            )
+            new_ov = list(obj.get("new_overrides") or [])
+            seen = {str(x.get("subject")) for x in canon_overrides}
+            for item in new_ov:
+                if not isinstance(item, dict):
+                    continue
+                subj = str(item.get("subject") or "").strip()
+                if not subj or subj in seen:
+                    continue
+                item["effective_from_chapter"] = int(
+                    item.get("effective_from_chapter", current_idx) or current_idx
+                )
+                canon_overrides.append(item)
+                seen.add(subj)
+        except Exception as exc:
+            logger.warning("[post_chapter] canon_overrides chapter extract failed: %s", exc)
+
     return {
         "last_chapter_summary": chapter_summary,
         "character_graph": merged_graph,
+        "canon_overrides": canon_overrides,
+        "consistency_report": consistency_report,
     }
 
 

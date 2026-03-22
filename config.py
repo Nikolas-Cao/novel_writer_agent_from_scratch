@@ -52,3 +52,17 @@ VECTOR_STORE_DIR = Path(os.getenv("VECTOR_STORE_DIR", str(_project_root / "vecto
 # 目录约定（文档用）：每个项目对应 PROJECTS_ROOT/{project_id}/，
 # 其下可有 chapters/、images/、character_graph.json；
 # 向量库使用 VECTOR_STORE_DIR/{project_id} 或统一库按 project_id 区分 collection。
+
+# ----- 全局同人知识库（txt/md，大文件流式构建）-----
+# 物理根目录：VECTOR_STORE_DIR/global_kb/（见 knowledge_base.store）
+KB_CHUNK_TARGET_CHARS = int(os.getenv("KB_CHUNK_TARGET_CHARS", "900"))
+KB_CHUNK_OVERLAP_CHARS = int(os.getenv("KB_CHUNK_OVERLAP_CHARS", "120"))
+KB_INGEST_BATCH_CHUNKS = int(os.getenv("KB_INGEST_BATCH_CHUNKS", "400"))
+KB_READ_BLOCK_BYTES = int(os.getenv("KB_READ_BLOCK_BYTES", "65536"))
+KB_MAX_CHUNKS_PER_DOCUMENT = int(os.getenv("KB_MAX_CHUNKS_PER_DOCUMENT", "200000"))
+KB_ASSET_LEAF_BATCH_CHARS = int(os.getenv("KB_ASSET_LEAF_BATCH_CHARS", "12000"))
+KB_ASSET_MAX_LEAF_WINDOWS = int(os.getenv("KB_ASSET_MAX_LEAF_WINDOWS", "600"))
+KB_RETRIEVE_CHROMA_K = int(os.getenv("KB_RETRIEVE_CHROMA_K", "12"))
+KB_RETRIEVE_FTS_K = int(os.getenv("KB_RETRIEVE_FTS_K", "12"))
+KB_RETRIEVE_FINAL_K = int(os.getenv("KB_RETRIEVE_FINAL_K", "8"))
+KB_TOOL_LOOP_MAX_CALLS = int(os.getenv("KB_TOOL_LOOP_MAX_CALLS", "2"))

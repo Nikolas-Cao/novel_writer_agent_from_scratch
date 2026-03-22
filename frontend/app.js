@@ -87,6 +87,20 @@ const api = {
       .then(ensureOk)
       .then((r) => r.json());
   },
+  patch: (url, body) => {
+    const full = apiUrl(url);
+    console.log("[API] PATCH", full, body);
+    return fetch(full, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    })
+      .catch((err) => {
+        throw normalizeNetworkError(err, full);
+      })
+      .then(ensureOk)
+      .then((r) => r.json());
+  },
 };
 
 function normalizeNetworkError(err, fullUrl) {
@@ -227,6 +241,205 @@ function createChapterStreamProgressHandler(streamStage) {
   return { onProgress, flushNow };
 }
 
+async function apiUploadMultipart(urlPath, file) {
+  const full = apiUrl(urlPath);
+  const fd = new FormData();
+  fd.append("file", file);
+  console.log("[API] POST multipart", full, file.name);
+  const resp = await fetch(full, { method: "POST", body: fd }).catch((err) => {
+    throw normalizeNetworkError(err, full);
+  });
+  if (!resp.ok) {
+    const t = await resp.text();
+    throw new Error(extractBackendErrorMessage(resp, t));
+  }
+  return resp.json();
+}
+
+function getSelectedKbIdsFromUi() {
+  const nodes = document.querySelectorAll(".kb-bind-cb");
+  const ids = [];
+  nodes.forEach((cb) => {
+    if (cb.checked) ids.push(cb.value);
+  });
+  return ids;
+}
+
+function updateKbBindLock() {
+  const noProject = !state.currentProjectId;
+  const locked = Boolean(state.currentProjectId && state.currentProjectKbBindLocked);
+  document.querySelectorAll(".kb-bind-cb").forEach((cb) => {
+    cb.disabled = noProject || locked;
+  });
+}
+
+async function patchProjectKnowledgeBases() {
+  if (!state.currentProjectId || state.currentProjectKbBindLocked) return;
+  const ids = getSelectedKbIdsFromUi();
+  try {
+    await api.patch(`/projects/${state.currentProjectId}/knowledge-bases`, {
+      selected_kb_ids: ids,
+    });
+    state.currentProjectKbIds = ids;
+    setStatus(`已更新知识库绑定（${ids.length} 个）`);
+  } catch (e) {
+    setStatus(`知识库绑定失败：${e.message}`);
+  }
+}
+
+async function loadKnowledgeBases() {
+  try {
+    const data = await api.get("/knowledge-bases");
+    state.knowledgeBases = data.knowledge_bases || [];
+    renderKbList();
+    populateKbAssetsSelect();
+    if (el.kbAssetsPanel) {
+      el.kbAssetsPanel.hidden = state.knowledgeBases.length === 0;
+    }
+  } catch (e) {
+    setStatus(`加载知识库失败：${e.message}`);
+  }
+}
+
+function populateKbAssetsSelect() {
+  if (!el.kbAssetsKbSelect) return;
+  el.kbAssetsKbSelect.innerHTML = "";
+  state.knowledgeBases.forEach((kb) => {
+    const opt = document.createElement("option");
+    opt.value = kb.kb_id;
+    opt.textContent = `${kb.name || kb.kb_id} (${kb.kb_id})`;
+    el.kbAssetsKbSelect.appendChild(opt);
+  });
+}
+
+async function fetchKbDetailDocs(kbId) {
+  try {
+    const d = await api.get(`/knowledge-bases/${kbId}`);
+    return d.documents || [];
+  } catch (_) {
+    return [];
+  }
+}
+
+async function renderKbList() {
+  if (!el.kbList) return;
+  el.kbList.innerHTML = "";
+  for (const kb of state.knowledgeBases) {
+    const id = kb.kb_id;
+    const li = document.createElement("li");
+    li.className = "kb-item";
+    const head = document.createElement("div");
+    head.className = "kb-item-head";
+    const label = document.createElement("label");
+    label.className = "checkbox kb-bind-label";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.className = "kb-bind-cb";
+    cb.value = id;
+    cb.checked = state.currentProjectKbIds.includes(id);
+    cb.addEventListener("change", () => {
+      patchProjectKnowledgeBases();
+    });
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(" 绑定当前项目"));
+    const strong = document.createElement("strong");
+    strong.textContent = kb.name || id;
+    const code = document.createElement("code");
+    code.className = "kb-id";
+    code.textContent = id;
+    head.appendChild(label);
+    head.appendChild(strong);
+    head.appendChild(code);
+    li.appendChild(head);
+    const uploadRow = document.createElement("div");
+    uploadRow.className = "kb-upload-row";
+    const fileInp = document.createElement("input");
+    fileInp.type = "file";
+    fileInp.accept = ".txt,.md";
+    fileInp.addEventListener("change", () => onKbFileSelected(id, fileInp));
+    uploadRow.appendChild(fileInp);
+    li.appendChild(uploadRow);
+    const docsEl = document.createElement("div");
+    docsEl.className = "kb-docs";
+    docsEl.textContent = "文档加载中…";
+    li.appendChild(docsEl);
+    el.kbList.appendChild(li);
+    fetchKbDetailDocs(id).then((docs) => {
+      if (!docs.length) {
+        docsEl.textContent = "尚无文档";
+        return;
+      }
+      docsEl.textContent = docs
+        .map((d) => `${d.filename || d.doc_id}: ${d.status || ""}${d.chunks != null ? ` (${d.chunks}段)` : ""}`)
+        .join("；");
+    });
+  }
+  updateKbBindLock();
+}
+
+async function pollKbJob(kbId, jobId) {
+  for (let i = 0; i < 90; i += 1) {
+    try {
+      const j = await api.get(`/knowledge-bases/${kbId}/jobs/${jobId}`);
+      const st = j.status || "";
+      if (st === "ready" || st === "failed" || st === "cancelled") {
+        return j;
+      }
+    } catch (_) {
+      /* ignore */
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  return { status: "timeout" };
+}
+
+async function onKbFileSelected(kbId, input) {
+  const file = input.files && input.files[0];
+  if (!file || !kbId) return;
+  setStatus(`上传 ${file.name} …`);
+  try {
+    const data = await apiUploadMultipart(`/knowledge-bases/${kbId}/documents`, file);
+    setStatus(`构建中 job=${data.job_id} …`);
+    const job = await pollKbJob(kbId, data.job_id);
+    setStatus(`构建结束：${job.status || "unknown"}`);
+    await loadKnowledgeBases();
+  } catch (e) {
+    setStatus(`上传失败：${e.message}`);
+  }
+  input.value = "";
+}
+
+async function createKnowledgeBase() {
+  const name = (el.kbNewName && el.kbNewName.value.trim()) || "";
+  if (!name) {
+    setStatus("请输入知识集名称");
+    return;
+  }
+  try {
+    await api.post("/knowledge-bases", { name });
+    if (el.kbNewName) el.kbNewName.value = "";
+    setStatus("知识集已创建");
+    await loadKnowledgeBases();
+  } catch (e) {
+    setStatus(`创建失败：${e.message}`);
+  }
+}
+
+async function loadKbAssetsSummary() {
+  if (!el.kbAssetsKbSelect || !el.kbAssetsView) return;
+  const kbId = el.kbAssetsKbSelect.value;
+  if (!kbId) return;
+  setStatus("加载知识摘要…");
+  try {
+    const data = await api.get(`/knowledge-bases/${kbId}/assets/summary`);
+    el.kbAssetsView.textContent = JSON.stringify(data.assets || {}, null, 2);
+    setStatus("摘要已加载");
+  } catch (e) {
+    el.kbAssetsView.textContent = e.message;
+    setStatus(`加载摘要失败：${e.message}`);
+  }
+}
+
 function extractBackendErrorMessage(resp, rawText) {
   const text = String(rawText || "").trim();
   if (!text) return `HTTP ${resp.status}`;
@@ -265,6 +478,11 @@ const state = {
   isChapterWriteInProgress: false,
   /** 用于防止 openChapter 的请求乱序覆盖 UI */
   openChapterRequestSeq: 0,
+  knowledgeBases: [],
+  /** 与后端 PATCH 知识库绑定限制一致：已有结构化/文本大纲后不可改 */
+  currentProjectKbBindLocked: false,
+  /** @type {string[]} */
+  currentProjectKbIds: [],
 };
 
 const el = {
@@ -304,6 +522,14 @@ const el = {
   btnRollbackTail: document.getElementById("btn-rollback-tail"),
   btnRegenerateChapter: document.getElementById("btn-regenerate-chapter"),
   btnRewrite: document.getElementById("btn-rewrite"),
+  btnRefreshKb: document.getElementById("btn-refresh-kb"),
+  btnCreateKb: document.getElementById("btn-create-kb"),
+  kbNewName: document.getElementById("kb-new-name-input"),
+  kbList: document.getElementById("kb-list"),
+  kbAssetsPanel: document.getElementById("kb-assets-panel"),
+  kbAssetsKbSelect: document.getElementById("kb-assets-kb-select"),
+  btnLoadKbAssets: document.getElementById("btn-load-kb-assets"),
+  kbAssetsView: document.getElementById("kb-assets-view"),
 };
 
 function buildChapterCharacterGraphHtml(data, chapterIndex) {
@@ -441,6 +667,19 @@ function hasOutlineData(projectData) {
     projectData.outline.trim().length > 0;
   const hasChapters = Array.isArray(projectData && projectData.chapters) && projectData.chapters.length > 0;
   return hasOutlineVolumes || hasOutlineText || hasChapters;
+}
+
+/** 与 server._project_has_outline 对齐：仅大纲存在时锁定知识库绑定（不因仅有章节而锁定）。 */
+function projectHasOutlineForKbLock(projectData) {
+  const volumes =
+    (projectData &&
+      projectData.outline_structure &&
+      Array.isArray(projectData.outline_structure.volumes) &&
+      projectData.outline_structure.volumes) ||
+    [];
+  if (volumes.length > 0) return true;
+  const outlineStr = projectData && projectData.outline;
+  return typeof outlineStr === "string" && outlineStr.trim().length > 0;
 }
 
 function updateCreatePanelVisibility(projectData) {
@@ -823,7 +1062,16 @@ async function openProject(projectId) {
     state.projectPreviews[projectId] = buildProjectPreview(p);
     if (p.created_at != null) state.projectCreatedAt[projectId] = Number(p.created_at);
     renderProjectList(state.projectIds);
-    el.projectMeta.textContent = `项目：${projectId} | 目标章节：${p.total_chapters || "-"} | 已生成：${generatedCount}章 | 当前章节：${currentIndexOneBased}`;
+    state.currentProjectKbBindLocked = projectHasOutlineForKbLock(p);
+    state.currentProjectKbIds = Array.isArray(p.selected_kb_ids) ? p.selected_kb_ids.map(String) : [];
+    await loadKnowledgeBases();
+    const kbPart =
+      state.currentProjectKbBindLocked && state.currentProjectKbIds.length
+        ? `已绑定知识库 ${state.currentProjectKbIds.length} 个（大纲已生成，绑定已锁定）`
+        : state.currentProjectKbIds.length
+          ? `已绑定知识库 ${state.currentProjectKbIds.length} 个`
+          : "未绑定知识库";
+    el.projectMeta.textContent = `项目：${projectId} | 目标章节：${p.total_chapters || "-"} | 已生成：${generatedCount}章 | 当前章节：${currentIndexOneBased} | ${kbPart}`;
     renderTokenUsage(p);
     renderOutline(p.outline_structure);
     renderChapterList(chapters);
@@ -840,11 +1088,14 @@ async function openProject(projectId) {
     }
   } catch (e) {
     state.currentChapterIndex = null;
+    state.currentProjectKbBindLocked = false;
+    state.currentProjectKbIds = [];
     if (el.tokenUsage) el.tokenUsage.innerHTML = "";
     updateCreatePanelVisibility(null);
     updateDetailLayout(null);
     setDetailPanelVisibility(false);
     setStatus(`打开失败：${e.message}`);
+    void loadKnowledgeBases();
   }
 }
 
@@ -853,11 +1104,14 @@ async function refreshProjectsAndHideDetail() {
   state.currentChapterIndex = null;
   state.selectedChapterIndex = null;
   state.chapterMetas = [];
+  state.currentProjectKbBindLocked = false;
+  state.currentProjectKbIds = [];
   renderProjectList(state.projectIds);
   updateCreatePanelVisibility(null);
   updateDetailLayout(null);
   setDetailPanelVisibility(false);
   await loadProjects();
+  await loadKnowledgeBases();
 }
 
 function startNewProject() {
@@ -865,6 +1119,8 @@ function startNewProject() {
   state.currentChapterIndex = null;
   state.selectedChapterIndex = null;
   state.chapterMetas = [];
+  state.currentProjectKbBindLocked = false;
+  state.currentProjectKbIds = [];
   state.plotIdeas = [];
   state.selectedIdea = "";
   state.expandedIdeaIndex = null;
@@ -875,6 +1131,7 @@ function startNewProject() {
   setPlotIdeasSectionVisibility(false);
   setStatus("请输入创作意图后，点击「生成概要」（或先「新建项目」再生成）");
   if (el.instruction) el.instruction.focus();
+  void loadKnowledgeBases();
 }
 
 function renderPlotIdeas(ideas) {
@@ -1107,9 +1364,11 @@ async function generateIdeas() {
     if (!state.currentProjectId) {
       setStatus("创建项目...");
       const totalChapters = parseTotalChaptersInput();
+      const selectedKbIds = getSelectedKbIdsFromUi();
       const p = await api.post("/projects", {
         instruction,
         ...(totalChapters ? { total_chapters: totalChapters } : {}),
+        ...(selectedKbIds.length ? { selected_kb_ids: selectedKbIds } : {}),
       });
       const pid = p && p.project_id;
       if (!pid) {
@@ -1366,6 +1625,9 @@ function bindEvents() {
   bindClick(el.btnViewCharacterGraphModal, openCharacterGraphModal);
   bindClick(el.btnCloseChapterModal, closeChapterModal);
   bindClick(el.btnCloseCharacterGraphModal, closeCharacterGraphModal);
+  bindClick(el.btnRefreshKb, loadKnowledgeBases);
+  bindClick(el.btnCreateKb, createKnowledgeBase);
+  bindClick(el.btnLoadKbAssets, loadKbAssetsSummary);
 
   // 防御式兜底：即使未来引入了 form，也避免默认提交触发整页刷新。
   document.addEventListener("submit", (event) => {
@@ -1401,12 +1663,14 @@ if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", function () {
     setPlotIdeasSectionVisibility(false);
     bindEvents();
-    loadProjects();
+    void loadProjects();
+    void loadKnowledgeBases();
     adjustChapterViewHeight();
   });
 } else {
   setPlotIdeasSectionVisibility(false);
   bindEvents();
-  loadProjects();
+  void loadProjects();
+  void loadKnowledgeBases();
   adjustChapterViewHeight();
 }

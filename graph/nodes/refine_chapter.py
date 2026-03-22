@@ -7,6 +7,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+from graph.knowledge_context import format_canon_overrides
 from graph.llm import create_writer_llm
 from graph.utils import get_message_text, sanitize_chapter_markdown
 from state import NovelProjectState
@@ -42,6 +43,20 @@ async def refine_chapter_node(
     if not draft:
         raise ValueError("No chapter draft found for refinement.")
 
+    guard = ""
+    ov = format_canon_overrides(state.get("canon_overrides"))
+    if ov.strip():
+        guard += ov + "\n\n"
+    kb_a = (state.get("kb_assets_text") or "").strip()
+    kb_e = (state.get("kb_evidence_text") or "").strip()
+    if kb_a or kb_e:
+        guard += (
+            "【一致性】若正文与「二创设定覆盖」冲突，以保持二创为准；"
+            "知识库摘录仅用于修正明显笔误或称谓，勿用原著覆盖已写二创情节。\n"
+            f"【知识库摘要（节选）】\n{kb_a[:4000]}\n\n"
+            f"【知识库证据（节选）】\n{kb_e[:4000]}\n\n"
+        )
+
     prompt = (
         "你是小说编辑，请润色以下章节。\n"
         "要求：\n"
@@ -50,6 +65,7 @@ async def refine_chapter_node(
         "3) 不改变核心剧情与章节结构；\n"
         "4) 仅输出润色后的章节正文，禁止输出“核心亮点/说明/总结/点评”；\n"
         "5) 禁止输出 Markdown 代码围栏（不要出现 ```markdown 或 ```）。\n\n"
+        f"{guard}"
         f"{draft}"
     )
     t0 = time.monotonic()

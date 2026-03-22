@@ -5,7 +5,7 @@
 import logging
 import time
 import uuid
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -14,9 +14,11 @@ from config import (
     CHARACTER_GRAPH_RECENT_CHAPTERS,
     RAG_PREVIOUS_CHAPTERS,
 )
+from graph.knowledge_context import build_kb_context_for_writing, format_canon_overrides
 from graph.llm import create_writer_llm
 from graph.utils import get_message_text, sanitize_chapter_markdown
 from rag import LocalRagRetriever
+from rag.global_kb_retriever import GlobalKbRetriever
 from state import ChapterMeta, NovelProjectState
 from storage import ChapterStore, CharacterGraphStore
 
@@ -51,6 +53,8 @@ async def write_chapter_node(
     chapter_store: Optional[ChapterStore] = None,
     rag_retriever: Optional[LocalRagRetriever] = None,
     graph_store: Optional[CharacterGraphStore] = None,
+    global_kb_retriever: Optional[GlobalKbRetriever] = None,
+    planner_llm: Optional[Any] = None,
 ) -> Dict[str, Any]:
     writer = llm or create_writer_llm()
     store = chapter_store or ChapterStore()
@@ -116,6 +120,47 @@ async def write_chapter_node(
     ) if summaries else "（暂无可检索前文摘要）"
 
     points_text = "\n".join([f"- {p}" for p in points]) if points else "- （暂无要点）"
+
+    kb_assets_text = ""
+    kb_evidence_text = ""
+    kb_confidence: Optional[float] = None
+    consistency_report: List[Dict[str, Any]] = []
+    if (
+        state.get("kb_enabled")
+        and state.get("selected_kb_ids")
+        and global_kb_retriever is not None
+    ):
+        kb_ctx = await build_kb_context_for_writing(
+            kb_ids=list(state.get("selected_kb_ids") or []),
+            title=title,
+            points=list(points or []),
+            retriever=global_kb_retriever,
+            planner=planner_llm,
+            doc_id=None,
+        )
+        kb_assets_text = kb_ctx.get("kb_assets_text") or ""
+        kb_evidence_text = kb_ctx.get("kb_evidence_text") or ""
+        kb_confidence = float(kb_ctx.get("kb_confidence") or 0.0)
+        if kb_confidence < 0.55:
+            consistency_report.append(
+                {
+                    "type": "kb_retrieval_low_confidence",
+                    "detail": "知识库检索证据偏少，请人工核对关键设定",
+                }
+            )
+
+    overrides_block = format_canon_overrides(state.get("canon_overrides"))
+    kb_block = ""
+    if kb_assets_text.strip() or kb_evidence_text.strip():
+        kb_block = (
+            f"\n\n{overrides_block}\n\n"
+            "【优先级】二创设定与上文已写情节 > 参考知识库（原著）。若冲突，遵循二创与本章要点。\n"
+            f"【知识库分层摘要】\n{kb_assets_text[:8000] or '（无）'}\n\n"
+            f"【知识库证据摘录】\n{kb_evidence_text[:9000] or '（无）'}"
+        )
+    elif overrides_block.strip():
+        kb_block = f"\n\n{overrides_block}"
+
     prompt = (
         "请根据以下章节信息撰写小说正文。\n"
         "要求：\n"
@@ -131,6 +176,7 @@ async def write_chapter_node(
         f"前文摘要（RAG）：\n{summary_block}\n\n"
         f"当前章大纲补充（RAG）：\n{outline_chunk or '（无）'}\n\n"
         f"相关人物与关系摘要：\n{character_summary}"
+        f"{kb_block}"
     )
     t0 = time.monotonic()
     logger.info(
@@ -170,6 +216,10 @@ async def write_chapter_node(
         "retrieved_summaries": summaries,
         "retrieved_outline_chunk": outline_chunk,
         "character_context_summary": character_summary,
+        "kb_assets_text": kb_assets_text,
+        "kb_evidence_text": kb_evidence_text,
+        "kb_confidence": kb_confidence,
+        "consistency_report": consistency_report,
     }
 
 

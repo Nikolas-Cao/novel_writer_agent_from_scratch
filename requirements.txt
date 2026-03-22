@@ -26,6 +26,7 @@ orjson==3.11.7
 ormsgpack==1.12.2
 packaging==26.0
 pydantic==2.12.5
+python-multipart
 pydantic_core==2.41.5
 python-dotenv==1.2.1
 PyYAML==6.0.3

@@ -165,6 +165,7 @@ def _expand_batch_prompt(
     prev_carry: str,
     lo: int,
     hi: int,
+    kb_suffix: str = "",
 ) -> str:
     rows = "\n".join(chapter_rows)
     carry = prev_carry.strip() if prev_carry.strip() else "（无，本批为开篇）"
@@ -180,6 +181,7 @@ def _expand_batch_prompt(
         "本批章节（global_index | 标题 | 节拍）：\n"
         f"{rows}\n"
         f"本批 global_index 列表：{_batch_indices_line(batch_global_indices)}"
+        f"{kb_suffix}"
     )
 
 
@@ -227,6 +229,7 @@ async def _expand_batches(
     on_progress: ProgressCallback,
     lo: int,
     hi: int,
+    kb_suffix: str = "",
 ) -> None:
     refs = _flatten_chapter_refs(outline_structure)
     batch_size = PLAN_OUTLINE_BATCH_SIZE
@@ -249,6 +252,7 @@ async def _expand_batches(
             prev_carry,
             lo,
             hi,
+            kb_suffix,
         )
         logger.info(
             "[plan_outline] expand_batch project=%s range=%s..%s",
@@ -281,11 +285,45 @@ async def _expand_batches(
         prev_carry = _carry_forward_from_points(last_ch.get("points") or [])
 
 
+async def _extract_canon_overrides(
+    planner: Any,
+    selected_plot_summary: str,
+    outline_text: str,
+    kb_context: str,
+) -> List[Dict[str, Any]]:
+    if not kb_context.strip():
+        return []
+    prompt = (
+        "你是同人创作策划。根据「剧情概要」「全书大纲」与「参考知识库」，列出明确的二创与原著可能冲突点及本作采用设定。\n"
+        "仅输出 JSON 对象：{\"canon_overrides\":[{\"subject\":\"\",\"original_fact\":\"\",\"fanfic_fact\":\"\",\"effective_from_chapter\":0}]}\n"
+        "若无明确冲突，canon_overrides 为空数组。\n\n"
+        f"剧情概要：{selected_plot_summary[:4000]}\n\n"
+        f"大纲：{outline_text[:12000]}\n\n"
+        f"参考知识：{kb_context[:8000]}"
+    )
+    try:
+        obj = await invoke_and_parse_with_retry(
+            planner,
+            prompt,
+            extract_json_object,
+            max_retries=2,
+        )
+        raw = obj.get("canon_overrides")
+        if isinstance(raw, list):
+            return [x for x in raw if isinstance(x, dict)]
+        if isinstance(obj, list):
+            return [x for x in obj if isinstance(x, dict)]
+    except Exception as exc:
+        logger.warning("[plan_outline] canon_overrides extract failed: %s", exc)
+    return []
+
+
 async def plan_outline_node(
     state: NovelProjectState,
     llm: Optional[Any] = None,
     rag_indexer: Optional[LocalRagIndexer] = None,
     on_progress: ProgressCallback = None,
+    kb_context: Optional[str] = None,
 ) -> Dict[str, Any]:
     planner = llm or create_planner_llm()
     selected_plot_summary = state.get("selected_plot_summary", "").strip()
@@ -296,9 +334,12 @@ async def plan_outline_node(
     project_id = (state.get("project_id") or "").strip() or "(no_project)"
     t0 = time.monotonic()
     lo, hi = _points_range(total_chapters)
+    kb_suffix = ""
+    if (kb_context or "").strip():
+        kb_suffix = "\n\n【参考知识库（原著/设定；若与概要冲突，以概要与本作二创为准）】\n" + (kb_context or "").strip()[:16000]
 
     if total_chapters <= PLAN_OUTLINE_SINGLE_CALL_MAX:
-        prompt = _single_call_prompt(selected_plot_summary, total_chapters)
+        prompt = _single_call_prompt(selected_plot_summary, total_chapters) + kb_suffix
         logger.info(
             "[plan_outline] single_call_begin project=%s target_chapters=%s",
             project_id,
@@ -322,7 +363,7 @@ async def plan_outline_node(
             )
         skel = await invoke_and_parse_with_retry(
             planner,
-            _skeleton_prompt(selected_plot_summary, total_chapters),
+            _skeleton_prompt(selected_plot_summary, total_chapters) + kb_suffix,
             extract_json_object,
             max_retries=3,
         )
@@ -336,6 +377,7 @@ async def plan_outline_node(
             on_progress,
             lo,
             hi,
+            kb_suffix,
         )
         for _v, _c, ch in _flatten_chapter_refs(outline_structure):
             pts = ch.get("points")
@@ -348,6 +390,22 @@ async def plan_outline_node(
         _index_outline_chunks(rag_indexer, project_id, outline_structure)
 
     n_vol = len(outline_structure.get("volumes") or [])
+    outline_str = outline_structure_to_string(outline_structure)
+    canon_overrides: List[Dict[str, Any]] = list(state.get("canon_overrides") or [])
+    if kb_suffix.strip():
+        new_ov = await _extract_canon_overrides(
+            planner,
+            selected_plot_summary,
+            outline_str,
+            (kb_context or "").strip()[:12000],
+        )
+        seen = {str(o.get("subject")) for o in canon_overrides}
+        for o in new_ov:
+            subj = str(o.get("subject") or "")
+            if subj and subj not in seen:
+                seen.add(subj)
+                canon_overrides.append(o)
+
     logger.info(
         "[plan_outline] done project=%s volumes=%s elapsed_s=%.2f",
         project_id,
@@ -356,7 +414,8 @@ async def plan_outline_node(
     )
     return {
         "outline_structure": outline_structure,
-        "outline": outline_structure_to_string(outline_structure),
+        "outline": outline_str,
+        "canon_overrides": canon_overrides,
     }
 
 
