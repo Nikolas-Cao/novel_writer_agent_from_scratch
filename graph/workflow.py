@@ -68,6 +68,13 @@ def build_stage2_workflow(
     return app, checkpointer
 
 
+def _illustration_edges(graph: StateGraph) -> None:
+    """identify -> fetch -> insert -> post（调用方需已注册四节点）。"""
+    graph.add_edge("identify_illustration_points", "fetch_or_generate_images")
+    graph.add_edge("fetch_or_generate_images", "insert_illustrations_into_chapter")
+    graph.add_edge("insert_illustrations_into_chapter", "post_chapter_update")
+
+
 def build_stage7_workflow(
     planner_llm: Optional[Any] = None,
     writer_llm: Optional[Any] = None,
@@ -111,6 +118,9 @@ def build_stage7_workflow(
     def n_refine_chapter(state: NovelProjectState):
         return asyncio.run(refine_chapter_node(state, llm=writer_llm, chapter_store=store))
 
+    def n_refine_after_rewrite(state: NovelProjectState):
+        return asyncio.run(refine_chapter_node(state, llm=writer_llm, chapter_store=store))
+
     def n_rewrite_feedback(state: NovelProjectState):
         return asyncio.run(rewrite_with_feedback_node(state, llm=writer_llm, chapter_store=store))
 
@@ -151,20 +161,31 @@ def build_stage7_workflow(
 
     def after_refine(state: NovelProjectState) -> str:
         feedback = (state.get("user_feedback") or "").strip()
-        return "rewrite_with_feedback" if feedback else "after_content_ready"
+        if feedback:
+            return "rewrite_with_feedback"
+        if state.get("enable_chapter_illustrations"):
+            return "identify_illustration_points"
+        return "post_chapter_update"
 
     def after_rewrite(state: NovelProjectState) -> str:
-        should_update = bool(state.get("update_outline_on_feedback", False))
-        return "update_outline_from_feedback" if should_update else "after_content_ready"
+        if state.get("update_outline_on_feedback"):
+            return "update_outline_from_feedback"
+        if state.get("enable_chapter_illustrations"):
+            return "identify_illustration_points"
+        return "post_chapter_update"
 
-    def after_content_ready(state: NovelProjectState) -> str:
-        enabled = bool(state.get("enable_chapter_illustrations", False))
-        return "identify_illustration_points" if enabled else "post_chapter_update"
+    def after_update_outline(state: NovelProjectState) -> str:
+        return (
+            "identify_illustration_points"
+            if state.get("enable_chapter_illustrations")
+            else "post_chapter_update"
+        )
 
     graph.add_node("generate_plot_ideas", n_generate_plot_ideas)
     graph.add_node("plan_outline", n_plan_outline)
     graph.add_node("write_chapter", n_write_chapter)
     graph.add_node("refine_chapter", n_refine_chapter)
+    graph.add_node("refine_after_rewrite", n_refine_after_rewrite)
     graph.add_node("rewrite_with_feedback", n_rewrite_feedback)
     graph.add_node("update_outline_from_feedback", n_update_outline)
     graph.add_node("identify_illustration_points", n_identify_illustration_points)
@@ -182,36 +203,30 @@ def build_stage7_workflow(
         after_refine,
         {
             "rewrite_with_feedback": "rewrite_with_feedback",
-            "after_content_ready": "identify_illustration_points",
+            "identify_illustration_points": "identify_illustration_points",
+            "post_chapter_update": "post_chapter_update",
         },
     )
+    graph.add_edge("rewrite_with_feedback", "refine_after_rewrite")
     graph.add_conditional_edges(
-        "rewrite_with_feedback",
+        "refine_after_rewrite",
         after_rewrite,
         {
             "update_outline_from_feedback": "update_outline_from_feedback",
-            "after_content_ready": "identify_illustration_points",
+            "identify_illustration_points": "identify_illustration_points",
+            "post_chapter_update": "post_chapter_update",
         },
     )
     graph.add_conditional_edges(
         "update_outline_from_feedback",
-        after_content_ready,
+        after_update_outline,
         {
             "identify_illustration_points": "identify_illustration_points",
             "post_chapter_update": "post_chapter_update",
         },
     )
 
-    graph.add_conditional_edges(
-        "identify_illustration_points",
-        after_content_ready,
-        {
-            "identify_illustration_points": "fetch_or_generate_images",
-            "post_chapter_update": "post_chapter_update",
-        },
-    )
-    graph.add_edge("fetch_or_generate_images", "insert_illustrations_into_chapter")
-    graph.add_edge("insert_illustrations_into_chapter", "post_chapter_update")
+    _illustration_edges(graph)
     graph.add_edge("post_chapter_update", END)
 
     checkpointer = try_create_sqlite_checkpointer() if use_local_checkpointer else None
@@ -257,6 +272,21 @@ def build_stage3_workflow(
     def n_refine_chapter(state: NovelProjectState):
         return asyncio.run(refine_chapter_node(state, llm=writer_llm, chapter_store=store))
 
+    def n_identify_illustration_points(state: NovelProjectState):
+        return asyncio.run(
+            identify_illustration_points_node(
+                state,
+                llm=planner_llm,
+                chapter_store=store,
+            )
+        )
+
+    def n_fetch_or_generate_images(state: NovelProjectState):
+        return asyncio.run(fetch_or_generate_images_node(state, project_root=store.root))
+
+    def n_insert_illustrations(state: NovelProjectState):
+        return asyncio.run(insert_illustrations_into_chapter_node(state, chapter_store=store))
+
     def n_post_chapter(state: NovelProjectState):
         return asyncio.run(
             post_chapter_node(
@@ -268,17 +298,35 @@ def build_stage3_workflow(
             )
         )
 
+    def route_after_refine_s3(state: NovelProjectState) -> str:
+        return (
+            "identify_illustration_points"
+            if state.get("enable_chapter_illustrations")
+            else "post_chapter_update"
+        )
+
     graph.add_node("generate_plot_ideas", n_generate_plot_ideas)
     graph.add_node("plan_outline", n_plan_outline)
     graph.add_node("write_chapter", n_write_chapter)
     graph.add_node("refine_chapter", n_refine_chapter)
+    graph.add_node("identify_illustration_points", n_identify_illustration_points)
+    graph.add_node("fetch_or_generate_images", n_fetch_or_generate_images)
+    graph.add_node("insert_illustrations_into_chapter", n_insert_illustrations)
     graph.add_node("post_chapter_update", n_post_chapter)
 
     graph.set_entry_point("generate_plot_ideas")
     graph.add_edge("generate_plot_ideas", "plan_outline")
     graph.add_edge("plan_outline", "write_chapter")
     graph.add_edge("write_chapter", "refine_chapter")
-    graph.add_edge("refine_chapter", "post_chapter_update")
+    graph.add_conditional_edges(
+        "refine_chapter",
+        route_after_refine_s3,
+        {
+            "identify_illustration_points": "identify_illustration_points",
+            "post_chapter_update": "post_chapter_update",
+        },
+    )
+    _illustration_edges(graph)
     graph.add_edge("post_chapter_update", END)
 
     checkpointer = try_create_sqlite_checkpointer() if use_local_checkpointer else None
@@ -328,6 +376,9 @@ def build_stage4_workflow(
     def n_refine_chapter(state: NovelProjectState):
         return asyncio.run(refine_chapter_node(state, llm=writer_llm, chapter_store=store))
 
+    def n_refine_after_rewrite(state: NovelProjectState):
+        return asyncio.run(refine_chapter_node(state, llm=writer_llm, chapter_store=store))
+
     def n_rewrite_feedback(state: NovelProjectState):
         return asyncio.run(rewrite_with_feedback_node(state, llm=writer_llm, chapter_store=store))
 
@@ -339,6 +390,21 @@ def build_stage4_workflow(
                 rag_indexer=indexer,
             )
         )
+
+    def n_identify_illustration_points(state: NovelProjectState):
+        return asyncio.run(
+            identify_illustration_points_node(
+                state,
+                llm=planner_llm,
+                chapter_store=store,
+            )
+        )
+
+    def n_fetch_or_generate_images(state: NovelProjectState):
+        return asyncio.run(fetch_or_generate_images_node(state, project_root=store.root))
+
+    def n_insert_illustrations(state: NovelProjectState):
+        return asyncio.run(insert_illustrations_into_chapter_node(state, chapter_store=store))
 
     def n_post_chapter(state: NovelProjectState):
         return asyncio.run(
@@ -353,18 +419,36 @@ def build_stage4_workflow(
 
     def after_refine(state: NovelProjectState) -> str:
         feedback = (state.get("user_feedback") or "").strip()
-        return "rewrite_with_feedback" if feedback else "post_chapter_update"
+        if feedback:
+            return "rewrite_with_feedback"
+        if state.get("enable_chapter_illustrations"):
+            return "identify_illustration_points"
+        return "post_chapter_update"
 
     def after_rewrite(state: NovelProjectState) -> str:
-        should_update = bool(state.get("update_outline_on_feedback", False))
-        return "update_outline_from_feedback" if should_update else "post_chapter_update"
+        if state.get("update_outline_on_feedback"):
+            return "update_outline_from_feedback"
+        if state.get("enable_chapter_illustrations"):
+            return "identify_illustration_points"
+        return "post_chapter_update"
+
+    def after_update_outline(state: NovelProjectState) -> str:
+        return (
+            "identify_illustration_points"
+            if state.get("enable_chapter_illustrations")
+            else "post_chapter_update"
+        )
 
     graph.add_node("generate_plot_ideas", n_generate_plot_ideas)
     graph.add_node("plan_outline", n_plan_outline)
     graph.add_node("write_chapter", n_write_chapter)
     graph.add_node("refine_chapter", n_refine_chapter)
+    graph.add_node("refine_after_rewrite", n_refine_after_rewrite)
     graph.add_node("rewrite_with_feedback", n_rewrite_feedback)
     graph.add_node("update_outline_from_feedback", n_update_outline)
+    graph.add_node("identify_illustration_points", n_identify_illustration_points)
+    graph.add_node("fetch_or_generate_images", n_fetch_or_generate_images)
+    graph.add_node("insert_illustrations_into_chapter", n_insert_illustrations)
     graph.add_node("post_chapter_update", n_post_chapter)
 
     graph.set_entry_point("generate_plot_ideas")
@@ -376,18 +460,29 @@ def build_stage4_workflow(
         after_refine,
         {
             "rewrite_with_feedback": "rewrite_with_feedback",
+            "identify_illustration_points": "identify_illustration_points",
+            "post_chapter_update": "post_chapter_update",
+        },
+    )
+    graph.add_edge("rewrite_with_feedback", "refine_after_rewrite")
+    graph.add_conditional_edges(
+        "refine_after_rewrite",
+        after_rewrite,
+        {
+            "update_outline_from_feedback": "update_outline_from_feedback",
+            "identify_illustration_points": "identify_illustration_points",
             "post_chapter_update": "post_chapter_update",
         },
     )
     graph.add_conditional_edges(
-        "rewrite_with_feedback",
-        after_rewrite,
+        "update_outline_from_feedback",
+        after_update_outline,
         {
-            "update_outline_from_feedback": "update_outline_from_feedback",
+            "identify_illustration_points": "identify_illustration_points",
             "post_chapter_update": "post_chapter_update",
         },
     )
-    graph.add_edge("update_outline_from_feedback", "post_chapter_update")
+    _illustration_edges(graph)
     graph.add_edge("post_chapter_update", END)
 
     checkpointer = try_create_sqlite_checkpointer() if use_local_checkpointer else None

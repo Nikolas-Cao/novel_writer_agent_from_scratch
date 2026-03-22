@@ -111,6 +111,10 @@ class NovelProjectState(TypedDict, total=False):
     character_context_summary: str
     last_chapter_summary: str
     update_outline_on_feedback: bool
+    # 插图（单图优先）：新字段 + 兼容旧版 illustration_points 列表
+    illustration_point: Optional[Dict[str, Any]]  # { position_describe, anchor_text, alt }
+    illustration_prompt: Optional[str]  # 文生图详细描述
+    illustration_asset: Optional[Dict[str, Any]]  # { image_path, source, alt, anchor_text, ... }
     illustration_points: List[dict]
     illustration_assets: List[dict]
     token_usage: Optional[Dict[str, Dict[str, int]]]  # model -> { input_tokens, output_tokens }

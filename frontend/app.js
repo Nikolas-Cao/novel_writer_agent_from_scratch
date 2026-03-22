@@ -295,6 +295,7 @@ const el = {
   feedbackRewriteSection: document.getElementById("feedback-rewrite-section"),
   feedback: document.getElementById("feedback-input"),
   updateOutline: document.getElementById("update-outline-checkbox"),
+  enableChapterIllustrations: document.getElementById("enable-chapter-illustrations-checkbox"),
   btnRefreshProjects: document.getElementById("btn-refresh-projects"),
   btnNewProject: document.getElementById("btn-new-project"),
   btnGenerateIdeas: document.getElementById("btn-generate-ideas"),
@@ -566,16 +567,64 @@ function renderTokenUsage(project) {
   el.tokenUsage.innerHTML = `<strong>Token 用量</strong><ul class="token-usage-list">${rows}</ul>`;
 }
 
+function escapeAttr(s) {
+  return String(s || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+/** 章节正文中的相对路径插图（project_id/chapters/...）映射到后端 /project-data/ */
+function resolveMarkdownImageSrc(src) {
+  const s = String(src || "").trim();
+  if (!s) return s;
+  if (/^https?:\/\//i.test(s)) return s;
+  if (s.startsWith("/project-data/")) return apiUrl(s);
+  const cleaned = s.replace(/^\.?\//, "");
+  if (!cleaned) return s;
+  return apiUrl(`/project-data/${cleaned}`);
+}
+
+/** 后端写入的 HTML img（含 title=生图提示词）：只解析 src 为可访问 URL */
+function resolvePreservedHtmlImgTag(tag) {
+  return tag.replace(/\bsrc="([^"]*)"/i, (_, srcRaw) => {
+    const resolved = resolveMarkdownImageSrc(
+      String(srcRaw || "")
+        .replace(/&quot;/g, '"')
+        .replace(/&amp;/g, "&")
+    );
+    return `src="${escapeAttr(resolved)}"`;
+  });
+}
+
 function renderMarkdown(md) {
-  // 先处理转义，再回填 markdown 语法
-  let html = escapeHtml(md || "");
+  const raw = md || "";
+  // 保留后端写入的 <img ...>（含 title 提示词），仅对其余内容 escape + Markdown 轻量转换
+  const parts = raw.split(/(<img\b[^>]*>)/gi);
+  let html = parts
+    .map((part, i) => {
+      if (i % 2 === 1) {
+        return resolvePreservedHtmlImgTag(part);
+      }
+      return escapeHtml(part);
+    })
+    .join("");
+
   html = html.replace(/^### (.+)$/gm, "<h3>$1</h3>");
   html = html.replace(/^## (.+)$/gm, "<h2>$1</h2>");
   html = html.replace(/^# (.+)$/gm, "<h1>$1</h1>");
   html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-  html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img alt="$1" src="$2" />');
+  html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_m, alt, srcRaw) => {
+    const resolved = resolveMarkdownImageSrc(srcRaw);
+    return `<img alt="${escapeAttr(alt)}" src="${escapeAttr(resolved)}" />`;
+  });
   html = html.replace(/\n\n+/g, "</p><p>");
   return `<p>${html}</p>`;
+}
+
+function illustrationFlagForApi() {
+  return Boolean(el.enableChapterIllustrations && el.enableChapterIllustrations.checked);
 }
 
 function setOutlineGeneratingUI(isGenerating) {
@@ -1148,7 +1197,7 @@ async function writeNextChapter() {
     }
     const data = await postNdjsonStream(
       `/projects/${state.currentProjectId}/chapters/next`,
-      {},
+      { enable_chapter_illustrations: illustrationFlagForApi() },
       onProgress
     );
     flushNow();
@@ -1222,7 +1271,7 @@ async function rewriteChapter() {
   setChapterNavigationLocked(true);
   setGlobalInteractionLocked(true);
   try {
-    const { onProgress, flushNow } = createChapterStreamProgressHandler("rewrite_feedback_stream");
+    const { onProgress, flushNow } = createChapterStreamProgressHandler("refine_chapter_stream");
     if (el.chapterView) {
       el.chapterView.innerHTML = `<pre class="streaming-pre"></pre>`;
     }
@@ -1231,6 +1280,7 @@ async function rewriteChapter() {
       {
         user_feedback: feedback,
         update_outline: el.updateOutline.checked,
+        enable_chapter_illustrations: illustrationFlagForApi(),
       },
       onProgress
     );
@@ -1275,7 +1325,7 @@ async function regenerateCurrentChapter() {
     }
     const data = await postNdjsonStream(
       `/projects/${state.currentProjectId}/chapters/${state.selectedChapterIndex}/regenerate`,
-      {},
+      { enable_chapter_illustrations: illustrationFlagForApi() },
       onProgress
     );
     flushNow();

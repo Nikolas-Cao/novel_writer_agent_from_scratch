@@ -73,6 +73,8 @@ class FrontWriterLLM:
         if "根据用户反馈重写" in prompt:
             return _Resp("# 第一章 雨夜\n\n重写后结尾更悬疑。")
         if "润色" in prompt:
+            if "悬疑" in prompt:
+                return _Resp("# 第一章 雨夜\n\n润色后仍保留悬疑收束。")
             return _Resp("# 第一章 雨夜\n\n润色后的正文。")
         return _Resp("# 第一章 雨夜\n\n初稿正文。")
 

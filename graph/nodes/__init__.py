@@ -1,4 +1,4 @@
-from .fetch_or_generate_images import fetch_or_generate_images_node
+from .fetch_or_generate_images import fetch_or_generate_images_node, generate_chapter_illustration_node
 from .generate_plot_ideas import generate_plot_ideas_node
 from .identify_illustration_points import identify_illustration_points_node
 from .insert_illustrations_into_chapter import insert_illustrations_into_chapter_node
@@ -16,6 +16,7 @@ __all__ = [
     "refine_chapter_node",
     "identify_illustration_points_node",
     "fetch_or_generate_images_node",
+    "generate_chapter_illustration_node",
     "insert_illustrations_into_chapter_node",
     "post_chapter_node",
     "rewrite_with_feedback_node",

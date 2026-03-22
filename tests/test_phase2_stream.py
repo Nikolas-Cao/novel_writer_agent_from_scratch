@@ -31,6 +31,10 @@ class FakeWriterLLMStream:
         self._full_text = full_text
         self._chunk_size = chunk_size
 
+    async def ainvoke(self, _prompt: str):
+        """非流式路径（如 API 中 rewrite 阶段关闭 token 流时使用）。"""
+        return _RespChunk(self._full_text)
+
     async def astream(self, _prompt: str):
         # 断点式吐出内容，模拟 token 增量。
         i = 0
@@ -80,6 +84,49 @@ def test_refine_chapter_stream_emits_and_saves():
     assert all(stage == "refine_chapter_stream" for stage, _ in emitted)
     joined = "".join(msg for _, msg in emitted)
     assert joined == expected
+
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def test_rewrite_with_feedback_non_stream_saves_without_token_emits():
+    """与 server 中 rewrite 阶段 stream_llm_output=False 一致：不落 token 进度，仍写回文件。"""
+    from graph.nodes.rewrite_feedback import rewrite_with_feedback_node
+    from storage import ChapterStore
+
+    root = _tmp_root()
+    store = ChapterStore(root=root)
+    project_id = "p-stream-rewrite-nostream"
+    idx = 1
+
+    expected = "# 第一章\n\n重写后无流式但仍保存。"
+    emitted: list[tuple[str, str]] = []
+
+    async def emit(stage: str, message: str) -> None:
+        emitted.append((stage, message))
+
+    state = {
+        "project_id": project_id,
+        "current_chapter_index": idx,
+        "user_feedback": "改一下",
+        "current_chapter_final": "# 第一章\n\n旧文本",
+        "chapters": [{"index": idx, "title": "第一章"}],
+        "chapter_word_target": 300,
+    }
+
+    out = asyncio.run(
+        rewrite_with_feedback_node(
+            state,
+            llm=FakeWriterLLMStream(expected, chunk_size=7),
+            chapter_store=store,
+            stream_llm_output=False,
+            emit_token_progress=emit,
+        )
+    )
+
+    saved = store.load(project_id, idx)
+    assert saved == expected
+    assert out["current_chapter_final"] == expected
+    assert emitted == []
 
     shutil.rmtree(root, ignore_errors=True)
 

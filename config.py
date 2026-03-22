@@ -26,6 +26,15 @@ WRITER_MODEL = os.getenv("WRITER_MODEL") or _default_model
 WRITER_BASE_URL = os.getenv("WRITER_BASE_URL") or _default_base_url
 WRITER_API_KEY = os.getenv("WRITER_API_KEY") or _default_api_key
 
+# 章节插图：OpenAI Images API（失败时跳过插图，不回退占位图）
+# 未设置 IMAGE_GEN_API_KEY 时回退到 OPENAI_API_KEY / PLANNER_API_KEY
+IMAGE_GEN_API_KEY = os.getenv("IMAGE_GEN_API_KEY") or os.getenv("OPENAI_API_KEY") or PLANNER_API_KEY
+_image_gen_base = os.getenv("IMAGE_GEN_BASE_URL", "").strip()
+IMAGE_GEN_BASE_URL = _image_gen_base or None  # None 表示官方 api.openai.com
+IMAGE_GEN_MODEL = os.getenv("IMAGE_GEN_MODEL", "dall-e-3")
+IMAGE_GEN_SIZE = os.getenv("IMAGE_GEN_SIZE", "1024x1024")  # 依模型支持而定
+IMAGE_GEN_TIMEOUT_S = float(os.getenv("IMAGE_GEN_TIMEOUT_S", "120"))
+
 # ----- 写作与 RAG 参数 -----
 CHAPTER_WORD_TARGET = int(os.getenv("CHAPTER_WORD_TARGET", "3000"))
 DEFAULT_TOTAL_CHAPTERS = int(os.getenv("DEFAULT_TOTAL_CHAPTERS", "100"))

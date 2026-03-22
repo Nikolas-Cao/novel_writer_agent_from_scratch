@@ -84,6 +84,9 @@ class ApiWriterLLM:
         if "根据用户反馈重写" in prompt:
             return _Resp("# 第一章 雨夜\n\n重写后结尾更悬疑，门外传来第二次敲门声。")
         if "润色" in prompt:
+            # 反馈重写后会再跑一次 refine：润色稿需保留「悬疑」以满足接口验收断言
+            if "悬疑" in prompt:
+                return _Resp("# 第一章 雨夜\n\n润色后仍保留悬疑收束，氛围更紧。")
             return _Resp("# 第一章 雨夜\n\n润色后的章节内容，氛围更紧张。")
         return _Resp("# 第一章 雨夜\n\n初稿章节内容。")
 

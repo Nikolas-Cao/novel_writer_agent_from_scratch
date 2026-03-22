@@ -28,12 +28,17 @@ async def refine_chapter_node(
     if not project_id:
         raise ValueError("project_id is required.")
 
-    draft = state.get("current_chapter_draft", "").strip()
+    # 优先读 store：反馈重写等节点会更新文件但可能仍保留旧的 current_chapter_draft
+    draft = ""
+    try:
+        draft = store.load(project_id, current_idx).strip()
+    except FileNotFoundError:
+        draft = ""
     if not draft:
-        try:
-            draft = store.load(project_id, current_idx)
-        except FileNotFoundError:
-            draft = ""
+        draft = (
+            state.get("current_chapter_final", "").strip()
+            or state.get("current_chapter_draft", "").strip()
+        )
     if not draft:
         raise ValueError("No chapter draft found for refinement.")
 

@@ -42,6 +42,7 @@ copy .env-sample .env
 - `PLOT_IDEAS_COUNT`：生成剧情概要候选数量（默认 5）
 - `RAG_PREVIOUS_CHAPTERS`：写章时检索前文章节摘要数量（默认 5）
 - `CHARACTER_GRAPH_RECENT_CHAPTERS`：写章时人物关系摘要的章节滑窗宽度（默认 5）
+- `IMAGE_GEN_API_KEY` / `IMAGE_GEN_BASE_URL` / `IMAGE_GEN_MODEL` / `IMAGE_GEN_SIZE` / `IMAGE_GEN_TIMEOUT_S`：章节插图走 OpenAI Images（`IMAGE_GEN_API_KEY` 默认可回退 `OPENAI_API_KEY` / `PLANNER_API_KEY`）；生图失败则本张插图跳过
 - `PLAN_OUTLINE_SINGLE_CALL_MAX`：超过该章节数则大纲改为「骨架 + 分批扩写」多轮 LLM（默认 16）
 - `PLAN_OUTLINE_BATCH_SIZE`：大纲分批扩写时每批章节数（默认 10）
 - `PLAN_OUTLINE_LARGE_BOOK_CHAPTERS`：达到该章节数后每章要点条数降为 2～3（默认 40）
@@ -66,19 +67,20 @@ python -m uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 启动后打开：
 
 - `http://127.0.0.1:8000/` 或 `http://127.0.0.1:8000/app`（后端挂载同源静态前端）
+- 章节插图文件通过 **`/project-data/`** 静态访问（对应 `PROJECTS_ROOT` 下相对路径）
 
 你不需要单独“启动/构建前端”。只要后端已运行，就可以直接在浏览器中使用 UI：
 
 - 新建项目：输入创作意图 → 点击 `生成概要`
 - 选概要并生成大纲：选择候选/填写自定义 → 点击 `生成大纲`（章数较多时会多轮调用模型，耗时更长但输出更稳；长耗时接口可带查询参数 **`stream=1` 或 `stream=true`**，返回 NDJSON 进度流，可见分阶段进度）
-- 逐章创作：点击 `续写下一章`（如需修改再对“最新章”做反馈重写）
+- 逐章创作：点击 `续写下一章`（可选勾选 **「开启图片生成」**；如需修改再对“最新章”做反馈重写）
 
 如果你想用 Live Server 直接打开 `frontend/index.html`（仅开发调试更方便），注意 `index.html` 里只有在端口为 `5500` 时才会把 API 指向后端 `http://127.0.0.1:8000`，因此推荐用 `5500` 端口运行 Live Server。
 
 <details><summary>行为说明（与实现对齐）</summary>
 
 - **`GET /projects` 前的空项目清理**：创建超过约 **10 分钟**，且 state 中 **无大纲、无章节**（含磁盘上无章节 `.md`），且 **instruction / plot_ideas / selected_plot_summary 均为空** 的项目会被自动删除，并移除对应 `vector_store/{project_id}` 目录。详见学习指南「后端 API」一节。
-- **流式响应**：部分接口支持 `stream` 查询参数；NDJSON 进度通道在服务端使用**无界** `asyncio.Queue`，避免 token 高频进度与慢客户端之间的死锁。
+- **流式响应**：部分接口支持 `stream` 查询参数；NDJSON 进度通道在服务端使用**无界** `asyncio.Queue`，避免 token 高频进度与慢客户端之间的死锁。**反馈重写**在 `stream=1` 时仅对润色阶段推送正文 token 流（`refine_chapter_stream`），按反馈重写阶段不推送 token 流。
 
 </details>
 
@@ -102,7 +104,7 @@ npm run test:ui
 
 1. 提升本地 RAG 质量与性能：当前使用的是本地 hash 嵌入函数（`rag/embedding.py`），可考虑增加更强的本地 embedding 实现或对检索结果做更精细的重排序；同时为 `write_chapter` 的检索结果加缓存（按 `project_id + current_chapter_index` + 参数组合），避免反复拼 prompt。
 2. Markdown 渲染增强：前端 `renderMarkdown()` 目前属于轻量替换（标题/加粗/图片/段落），可补齐代码块、列表、链接、换行语义等，减少正文渲染差异。
-3. 插图管线的工程化：`enable_chapter_illustrations` 目前是可选分支；可以进一步做图片缓存去重、失败兜底策略（例如联网失败时直接使用离线生成或返回占位）。
+3. 插图管线的工程化：当前为「单张插图 + OpenAI 生图」，失败即跳过；策划侧强调情节相关锚点与大纲上下文，插入侧对锚点做多策略匹配，减少图总落在文末；可进一步做缓存去重、多图、或非 OpenAI 后端适配。
 4. 更稳的并发与任务控制：当前按钮禁用依赖前端请求 pending；可在后端加上“同一 `project_id` 的写操作互斥锁/队列”，避免同时触发导致状态写回顺序问题。
 5. 加强回归用例覆盖：现有 Playwright（`e2e/smoke.spec.ts`、`regression.spec.ts`、`stream-progress.spec.ts` 等）已覆盖首页控件、按钮可见性与 NDJSON 流式消费等关键点；下一步可以补 `回滚 tail` 删除行为、`rewrite` 可选更新大纲路径、插图 enable 分支的 UI/后端接口联动回归（仍建议尽量避免依赖真实 LLM）。
 6. 流式 NDJSON 背压：`stream=1` / `stream=true` 下 token 级进度极高频，后端 `ndjson_with_progress` 已用无界队列避免与慢客户端之间的死锁；若仍见“卡住”，可抓浏览器 Network 是否仍在收字节、后端日志是否停在某一 LLM 步骤。

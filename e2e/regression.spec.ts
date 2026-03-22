@@ -362,7 +362,7 @@ test.describe("UI regressions from past chats", () => {
       `/projects/${projectId}/chapters/${chapterIndex}/rewrite\\?stream=1`
     );
     const ndjson =
-      `{"type":"progress","stage":"rewrite_feedback_stream","message":"处理中"}\n` +
+      `{"type":"progress","stage":"refine_chapter_stream","message":"处理中"}\n` +
       `{"type":"result","body":{"chapter_index":${chapterIndex}}}\n`;
 
     await page.route(rewriteUrlPattern, async (route) => {

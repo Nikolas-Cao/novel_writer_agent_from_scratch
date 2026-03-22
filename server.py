@@ -118,6 +118,7 @@ class NextChapterRequest(BaseModel):
 class RewriteRequest(BaseModel):
     user_feedback: str = Field(..., min_length=1)
     update_outline: bool = False
+    enable_chapter_illustrations: Optional[bool] = None
 
 
 class RegenerateChapterRequest(BaseModel):
@@ -175,6 +176,8 @@ def create_app(
     projects_dir.mkdir(parents=True, exist_ok=True)
     vector_dir.mkdir(parents=True, exist_ok=True)
     states_dir.mkdir(parents=True, exist_ok=True)
+
+    app.mount("/project-data", StaticFiles(directory=str(projects_dir)), name="project_data")
 
     if frontend_dir.exists():
         app.mount("/assets", StaticFiles(directory=str(frontend_dir)), name="assets")
@@ -332,6 +335,32 @@ def create_app(
             logger.error(msg)
             raise HTTPException(status_code=504, detail=msg)
 
+    async def run_illustration_pipeline_after_refine(
+        state: Dict[str, Any],
+        *,
+        scene: str,
+        planner_llm: Any,
+        emit: ProgressFn,
+    ) -> None:
+        """在 refine 之后：识别插图点 → OpenAI 生图（失败则跳过）→ 插入正文。"""
+        if not state.get("enable_chapter_illustrations", False):
+            return
+        pid = state.get("project_id", "")
+        await emit("illustration_points", "正在识别插图位置并生成画面描述（LLM）…")
+        logger.info("[%s] step=identify_illustration_points project=%s", scene, pid)
+        out = await identify_illustration_points_node(
+            state, llm=planner_llm, chapter_store=chapter_store
+        )
+        state.update(out)
+        await emit("illustration_fetch", "正在使用 OpenAI 生成插图…")
+        logger.info("[%s] step=fetch_or_generate_images project=%s", scene, pid)
+        out = await fetch_or_generate_images_node(state, project_root=projects_dir)
+        state.update(out)
+        await emit("illustration_insert", "正在将插图插入正文…")
+        logger.info("[%s] step=insert_illustrations project=%s", scene, pid)
+        out = await insert_illustrations_into_chapter_node(state, chapter_store=chapter_store)
+        state.update(out)
+
     async def generate_chapter_for_current_index(
         state: Dict[str, Any],
         *,
@@ -369,19 +398,9 @@ def create_app(
                 emit_token_progress=_emit if stream_llm_output else None,
             )
             state.update(out)
-            if state.get("enable_chapter_illustrations", False):
-                await _emit("illustration_points", "正在识别插图位置（LLM）…")
-                logger.info("[%s] step=identify_illustration_points project=%s", scene, pid)
-                out = await identify_illustration_points_node(state, llm=_p, chapter_store=chapter_store)
-                state.update(out)
-                await _emit("illustration_fetch", "正在搜索/生成插图资源…")
-                logger.info("[%s] step=fetch_or_generate_images project=%s", scene, pid)
-                out = await fetch_or_generate_images_node(state, project_root=projects_dir)
-                state.update(out)
-                await _emit("illustration_insert", "正在将插图插入正文…")
-                logger.info("[%s] step=insert_illustrations project=%s", scene, pid)
-                out = await insert_illustrations_into_chapter_node(state, chapter_store=chapter_store)
-                state.update(out)
+            await run_illustration_pipeline_after_refine(
+                state, scene=scene, planner_llm=_p, emit=_emit
+            )
             await _emit("post_chapter", "正在生成摘要并更新人物图谱（LLM）…")
             logger.info("[%s] step=post_chapter project=%s chapter_index=%s", scene, pid, ch_idx)
             out = await post_chapter_node(
@@ -705,6 +724,8 @@ def create_app(
             state["current_chapter_final"] = chapter_text
             state["user_feedback"] = req.user_feedback
             state["update_outline_on_feedback"] = bool(req.update_outline)
+            if req.enable_chapter_illustrations is not None:
+                state["enable_chapter_illustrations"] = bool(req.enable_chapter_illustrations)
 
             tp, tw = _tracked(state)
             tw_stream = None
@@ -719,12 +740,13 @@ def create_app(
             )
             try:
                 await emit("rewrite", "正在根据反馈重写本章（LLM）…")
+                # stream=1 时仅 refine_chapter 推送 token 流；重写阶段不流式，避免前端预览停在「重写稿」与最终「润色稿」不一致。
                 out = await rewrite_with_feedback_node(
                     state,
                     llm=tw_stream or tw,
                     chapter_store=chapter_store,
-                    stream_llm_output=bool(stream),
-                    emit_token_progress=emit if stream else None,
+                    stream_llm_output=False,
+                    emit_token_progress=None,
                 )
                 state.update(out)
                 if req.update_outline:
@@ -735,6 +757,19 @@ def create_app(
                         rag_indexer=rag_indexer,
                     )
                     state.update(out)
+
+                await emit("refine_chapter", "正在润色重写后的本章（LLM）…")
+                out = await refine_chapter_node(
+                    state,
+                    llm=tw_stream or tw,
+                    chapter_store=chapter_store,
+                    stream_llm_output=bool(stream),
+                    emit_token_progress=emit if stream else None,
+                )
+                state.update(out)
+                await run_illustration_pipeline_after_refine(
+                    state, scene="反馈重写", planner_llm=tp, emit=emit
+                )
 
                 await emit("post_chapter", "正在刷新摘要与人物图谱（LLM）…")
                 out = await post_chapter_node(
