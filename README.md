@@ -14,6 +14,7 @@
 - 逐章续写/润色；最新章支持反馈重写
 - 结合本地 RAG 与人物图谱上下文保证连续性
 - **同人知识库（可选）**：上传全局 `.txt` / `.md` 原著参考，项目勾选绑定；写纲/写章/润色时注入检索上下文，**二创设定优先于原著**；大纲生成后绑定锁定
+- **章节视频生成（新增）**：把“最新章”自动拆分为 `scene/shot`，生成旁白与男女主对白分轨，执行一致性质检并产出时间线清单（落盘于 `projects/{project_id}/videos/{chapter}/`）
 
 
 ## 🛠️ 依赖安装与快速启动
@@ -49,6 +50,7 @@ copy .env-sample .env
 - `PLAN_OUTLINE_LARGE_BOOK_CHAPTERS`：达到该章节数后每章要点条数降为 2～3（默认 40）
 - `PROJECTS_ROOT` / `CHECKPOINT_DIR` / `VECTOR_STORE_DIR`：本地落盘根路径（默认分别为仓库下 `projects/`、`checkpoints/`、`vector_store/`）。**章节与人物图谱等在 `projects/{project_id}/`，Chroma 向量库在 `vector_store/{project_id}/`，API 状态 JSON 在 `checkpoints/api_state/{project_id}.json`**，与 `docs/项目实现学习指南.md` 一致。
 - **全局知识库摄取与检索**：`KB_CHUNK_TARGET_CHARS` / `KB_CHUNK_OVERLAP_CHARS` / `KB_INGEST_BATCH_CHUNKS` / `KB_READ_BLOCK_BYTES` / `KB_MAX_CHUNKS_PER_DOCUMENT`；摘要资产 map-reduce：`KB_ASSET_LEAF_BATCH_CHARS` / `KB_ASSET_MAX_LEAF_WINDOWS`；检索：`KB_RETRIEVE_CHROMA_K` / `KB_RETRIEVE_FTS_K` / `KB_RETRIEVE_FINAL_K`；低置信度补查：`KB_TOOL_LOOP_MAX_CALLS`（详见 `config.py`）。
+- **章节视频与语音（云端 API）**：`VIDEO_PROVIDER` / `VIDEO_API_BASE_URL` / `VIDEO_API_KEY` / `VIDEO_MODEL` / `VIDEO_TIMEOUT_S` / `VIDEO_MAX_RETRIES` / `VIDEO_TARGET_FPS` / `VIDEO_TARGET_RESOLUTION` / `VIDEO_DEFAULT_SCENE_SECONDS` / `VIDEO_MAX_BUDGET`；`TTS_PROVIDER` / `TTS_API_BASE_URL` / `TTS_API_KEY` / `TTS_MODEL` / `TTS_TIMEOUT_S` / `TTS_MAX_RETRIES` / `TTS_DEFAULT_NARRATION_SPEED`。未配置云端地址时会写入 mock 产物，便于本地联调。
 
 </details>
 
@@ -86,6 +88,7 @@ python -m uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 
 - **`GET /projects` 前的空项目清理**：创建超过约 **10 分钟**，且 state 中 **无大纲、无章节**（含磁盘上无章节 `.md`），且 **instruction / plot_ideas / selected_plot_summary 均为空** 的项目会被自动删除，并移除对应 `vector_store/{project_id}` 目录。详见学习指南「后端 API」一节。
 - **流式响应**：部分接口支持 `stream` 查询参数；NDJSON 进度通道在服务端使用**无界** `asyncio.Queue`，避免 token 高频进度与慢客户端之间的死锁。**反馈重写**在 `stream=1` 时仅对润色阶段推送正文 token 流（`refine_chapter_stream`），按反馈重写阶段不推送 token 流。
+- **视频任务队列**：`POST /projects/{project_id}/videos/chapters/{index}` 支持同步执行（`async_mode=false`）与异步入队（默认）；可通过 `GET /projects/{project_id}/videos/jobs/{job_id}` 查询状态，`POST /projects/{project_id}/videos/jobs/{job_id}/cancel` 取消任务，完成后用 `GET /projects/{project_id}/videos/chapters/{index}` 读取产物。
 
 </details>
 
@@ -113,4 +116,5 @@ npm run test:ui
 4. 更稳的并发与任务控制：当前按钮禁用依赖前端请求 pending；可在后端加上“同一 `project_id` 的写操作互斥锁/队列”，避免同时触发导致状态写回顺序问题。
 5. 加强回归用例覆盖：现有 Playwright（`e2e/smoke.spec.ts`、`regression.spec.ts`、`stream-progress.spec.ts` 等）已覆盖首页控件、按钮可见性与 NDJSON 流式消费等关键点；下一步可以补 `回滚 tail` 删除行为、`rewrite` 可选更新大纲路径、插图 enable 分支的 UI/后端接口联动回归（仍建议尽量避免依赖真实 LLM）。
 6. 流式 NDJSON 背压：`stream=1` / `stream=true` 下 token 级进度极高频，后端 `ndjson_with_progress` 已用无界队列避免与慢客户端之间的死锁；若仍见“卡住”，可抓浏览器 Network 是否仍在收字节、后端日志是否停在某一 LLM 步骤。
+7. 视频母版导出：当前输出为“可复现的时间线与混音清单（manifest）+ 质检报告”；后续可按平台规范接入实际渲染器（ffmpeg/NLE）与分发链路。
 

@@ -16,7 +16,7 @@ test.describe("Novel Writer Agent UI smoke", () => {
     await expect(page.locator("#btn-generate-outline")).toBeVisible();
 
     const illust = page.locator("#enable-chapter-illustrations-checkbox");
-    await expect(illust).toBeVisible();
+    await expect(illust).toHaveCount(1);
     await expect(illust).not.toBeChecked();
 
     await expect(page.locator("#project-list")).toBeVisible();

@@ -483,6 +483,10 @@ const state = {
   currentProjectKbBindLocked: false,
   /** @type {string[]} */
   currentProjectKbIds: [],
+  /** @type {Record<string, any>} */
+  chapterVideoOutputs: {},
+  selectedChapterVideoOutput: null,
+  isVideoJobInProgress: false,
 };
 
 const el = {
@@ -508,6 +512,8 @@ const el = {
   characterGraphModalContent: document.getElementById("character-graph-modal-content"),
   btnViewChapterModal: document.getElementById("btn-view-chapter-modal"),
   btnViewCharacterGraphModal: document.getElementById("btn-view-character-graph-modal"),
+  btnCreateAiVideo: document.getElementById("btn-create-ai-video"),
+  btnViewAiVideo: document.getElementById("btn-view-ai-video"),
   btnCloseChapterModal: document.getElementById("btn-close-chapter-modal"),
   btnCloseCharacterGraphModal: document.getElementById("btn-close-character-graph-modal"),
   feedbackRewriteSection: document.getElementById("feedback-rewrite-section"),
@@ -646,6 +652,65 @@ function updateChapterActionButtons() {
   }
   if (el.feedbackRewriteSection) {
     el.feedbackRewriteSection.hidden = !canModify;
+  }
+  const canCreateVideo = hasSelection && !state.isChapterWriteInProgress && !state.isVideoJobInProgress;
+  if (el.btnCreateAiVideo) {
+    el.btnCreateAiVideo.hidden = !hasSelection;
+    el.btnCreateAiVideo.disabled = !canCreateVideo;
+    el.btnCreateAiVideo.title = hasSelection ? "" : "请先在章节列表中打开一个章节";
+  }
+  const hasVideo = Boolean(state.selectedChapterVideoOutput);
+  if (el.btnViewAiVideo) {
+    el.btnViewAiVideo.hidden = !hasSelection || !hasVideo;
+    el.btnViewAiVideo.disabled = !hasSelection || !hasVideo;
+    el.btnViewAiVideo.title = hasVideo ? "" : "当前章节暂无已生成视频";
+  }
+}
+
+function getChapterVideoOutputByIndex(index) {
+  if (index === null || index === undefined) return null;
+  const byIndex = state.chapterVideoOutputs[String(Number(index))];
+  return byIndex || null;
+}
+
+function normalizeProjectDataRef(ref) {
+  const cleaned = String(ref || "").trim().replace(/^\.?\//, "");
+  if (!cleaned) return "";
+  return apiUrl(`/project-data/${cleaned}`);
+}
+
+function pickViewableVideoRef(output) {
+  if (!output || typeof output !== "object") return "";
+  if (output.final_video_ref) return String(output.final_video_ref);
+  const clips =
+    output.timeline_manifest &&
+    output.timeline_manifest.timeline &&
+    Array.isArray(output.timeline_manifest.timeline.clips)
+      ? output.timeline_manifest.timeline.clips
+      : [];
+  if (!clips.length) return "";
+  const preferred = clips.find((c) => /\.(mp4|webm|mov)$/i.test(String(c.video_ref || "")));
+  return String((preferred && preferred.video_ref) || clips[0].video_ref || "");
+}
+
+async function tryLoadChapterVideoOutput(projectId, chapterIndex, reqSeq) {
+  try {
+    const data = await api.get(`/projects/${projectId}/videos/chapters/${chapterIndex}`);
+    if (reqSeq !== state.openChapterRequestSeq) return;
+    if (state.currentProjectId !== projectId) return;
+    if (state.selectedChapterIndex !== chapterIndex) return;
+    const output = (data && data.output) || null;
+    if (output) {
+      state.chapterVideoOutputs[String(Number(chapterIndex))] = output;
+    }
+    state.selectedChapterVideoOutput = output;
+    updateChapterActionButtons();
+  } catch (_) {
+    if (reqSeq !== state.openChapterRequestSeq) return;
+    if (state.currentProjectId !== projectId) return;
+    if (state.selectedChapterIndex !== chapterIndex) return;
+    state.selectedChapterVideoOutput = null;
+    updateChapterActionButtons();
   }
 }
 
@@ -1055,6 +1120,11 @@ async function openProject(projectId) {
     setDetailPanelVisibility(showDetail);
     state.currentChapterIndex = resolvedCurrentIndex;
     state.selectedChapterIndex = null;
+    state.chapterVideoOutputs =
+      p && p.chapter_video_outputs && typeof p.chapter_video_outputs === "object"
+        ? p.chapter_video_outputs
+        : {};
+    state.selectedChapterVideoOutput = null;
     updateChapterActionButtons();
     if (el.totalChapters && Number.isFinite(p.total_chapters)) {
       el.totalChapters.value = String(p.total_chapters);
@@ -1090,6 +1160,8 @@ async function openProject(projectId) {
     state.currentChapterIndex = null;
     state.currentProjectKbBindLocked = false;
     state.currentProjectKbIds = [];
+    state.chapterVideoOutputs = {};
+    state.selectedChapterVideoOutput = null;
     if (el.tokenUsage) el.tokenUsage.innerHTML = "";
     updateCreatePanelVisibility(null);
     updateDetailLayout(null);
@@ -1106,6 +1178,8 @@ async function refreshProjectsAndHideDetail() {
   state.chapterMetas = [];
   state.currentProjectKbBindLocked = false;
   state.currentProjectKbIds = [];
+  state.chapterVideoOutputs = {};
+  state.selectedChapterVideoOutput = null;
   renderProjectList(state.projectIds);
   updateCreatePanelVisibility(null);
   updateDetailLayout(null);
@@ -1121,6 +1195,8 @@ function startNewProject() {
   state.chapterMetas = [];
   state.currentProjectKbBindLocked = false;
   state.currentProjectKbIds = [];
+  state.chapterVideoOutputs = {};
+  state.selectedChapterVideoOutput = null;
   state.plotIdeas = [];
   state.selectedIdea = "";
   state.expandedIdeaIndex = null;
@@ -1279,6 +1355,7 @@ async function openChapter(index) {
   const reqSeq = (state.openChapterRequestSeq += 1);
 
   state.selectedChapterIndex = index;
+  state.selectedChapterVideoOutput = getChapterVideoOutputByIndex(index);
   updateChapterActionButtons();
   highlightSelectedChapterInList(index);
   scrollToOutlineChapter(index);
@@ -1292,6 +1369,7 @@ async function openChapter(index) {
 
     el.chapterView.innerHTML = renderMarkdown(data.content || "");
     adjustChapterViewHeight();
+    void tryLoadChapterVideoOutput(projectIdAtRequest, requestedIndex, reqSeq);
     setStatus(`已加载第 ${requestedIndex + 1} 章`);
   } catch (e) {
     if (reqSeq !== state.openChapterRequestSeq) return;
@@ -1601,6 +1679,116 @@ async function regenerateCurrentChapter() {
   }
 }
 
+async function pollVideoJob(projectId, jobId) {
+  for (let i = 0; i < 180; i += 1) {
+    const j = await api.get(`/projects/${projectId}/videos/jobs/${jobId}`);
+    const status = String(j.status || "");
+    if (status === "succeeded" || status === "failed" || status === "cancelled") {
+      return j;
+    }
+    const stage = String(j.last_stage || "");
+    const message = String(j.last_message || "");
+    if (message || stage) {
+      setStatus(`视频生成中：${message || stage}`);
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  throw new Error("视频任务轮询超时，请稍后在项目中重新打开章节查看状态");
+}
+
+function videoJobFailureReason(job) {
+  if (!job || typeof job !== "object") return "";
+  const direct = ["error", "detail", "message", "last_message"];
+  for (const key of direct) {
+    const v = job[key];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  if (job.error && typeof job.error === "object") {
+    try {
+      return JSON.stringify(job.error);
+    } catch (_) {
+      return String(job.error);
+    }
+  }
+  return "";
+}
+
+async function createAiVideoForSelectedChapter() {
+  if (!state.currentProjectId) {
+    setStatus("请先创建或打开项目");
+    return;
+  }
+  if (state.selectedChapterIndex === null) {
+    setStatus("请先在章节列表中打开一个章节");
+    return;
+  }
+  const chapterIndex = Number(state.selectedChapterIndex);
+  const existing = getChapterVideoOutputByIndex(chapterIndex);
+  if (existing) {
+    const ok = window.confirm(
+      `第 ${chapterIndex + 1} 章已有视频产物，继续将覆盖现有视频内容。是否继续？`
+    );
+    if (!ok) return;
+  }
+  state.isVideoJobInProgress = true;
+  updateChapterActionButtons();
+  setChapterNavigationLocked(true);
+  setGlobalInteractionLocked(true);
+  setStatus(`第 ${chapterIndex + 1} 章视频生成任务已提交...`);
+  try {
+    const created = await api.post(
+      `/projects/${state.currentProjectId}/videos/chapters/${chapterIndex}`,
+      { async_mode: true, use_latest_character_bible: true }
+    );
+    const jobId = created && created.job_id;
+    if (!jobId) {
+      throw new Error("后端未返回视频任务 ID");
+    }
+    const done = await pollVideoJob(state.currentProjectId, jobId);
+    const st = String(done.status || "");
+    if (st !== "succeeded") {
+      const reason = videoJobFailureReason(done);
+      throw new Error(reason || `视频任务结束状态：${st || "unknown"}`);
+    }
+    const latest = await api.get(`/projects/${state.currentProjectId}/videos/chapters/${chapterIndex}`);
+    const output = (latest && latest.output) || null;
+    state.chapterVideoOutputs[String(chapterIndex)] = output;
+    state.selectedChapterVideoOutput = output;
+    updateChapterActionButtons();
+    setStatus(`第 ${chapterIndex + 1} 章视频已生成，可点击“查看视频”`);
+  } catch (e) {
+    setStatus(`创建AI视频失败：${e.message}`);
+  } finally {
+    state.isVideoJobInProgress = false;
+    updateChapterActionButtons();
+    setChapterNavigationLocked(false);
+    setGlobalInteractionLocked(false);
+  }
+}
+
+function viewAiVideoForSelectedChapter() {
+  if (state.selectedChapterIndex === null) {
+    setStatus("请先在章节列表中打开一个章节");
+    return;
+  }
+  const output = state.selectedChapterVideoOutput || getChapterVideoOutputByIndex(state.selectedChapterIndex);
+  if (!output) {
+    setStatus("当前章节暂无可查看视频，请先创建AI视频");
+    return;
+  }
+  const rel = pickViewableVideoRef(output);
+  if (!rel) {
+    setStatus("已找到视频任务结果，但没有可直接打开的视频文件");
+    return;
+  }
+  const url = normalizeProjectDataRef(rel);
+  if (!url) {
+    setStatus("视频路径无效，无法打开");
+    return;
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
 function bindEvents() {
   const bindClick = (node, handler) => {
     if (!node || typeof handler !== "function") return;
@@ -1621,6 +1809,8 @@ function bindEvents() {
   bindClick(el.btnRollbackTail, rollbackTailFromSelectedChapter);
   bindClick(el.btnRegenerateChapter, regenerateCurrentChapter);
   bindClick(el.btnRewrite, rewriteChapter);
+  bindClick(el.btnCreateAiVideo, createAiVideoForSelectedChapter);
+  bindClick(el.btnViewAiVideo, viewAiVideoForSelectedChapter);
   bindClick(el.btnViewChapterModal, openChapterModal);
   bindClick(el.btnViewCharacterGraphModal, openCharacterGraphModal);
   bindClick(el.btnCloseChapterModal, closeChapterModal);
