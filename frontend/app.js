@@ -490,6 +490,7 @@ const state = {
   selectedChapterVideoOutput: null,
   isVideoJobInProgress: false,
   contextMenuProjectId: null,
+  pendingDeleteProjectId: null,
 };
 
 const el = {
@@ -544,6 +545,11 @@ const el = {
   projectRenameInput: document.getElementById("project-rename-input"),
   btnProjectRenameConfirm: document.getElementById("btn-project-rename-confirm"),
   btnProjectRenameCancel: document.getElementById("btn-project-rename-cancel"),
+  projectDeleteModal: document.getElementById("project-delete-modal"),
+  projectDeleteMessage: document.getElementById("project-delete-message"),
+  btnProjectDeleteConfirm: document.getElementById("btn-project-delete-confirm"),
+  btnProjectDeleteCancel: document.getElementById("btn-project-delete-cancel"),
+  btnProjectDeleteCancelTop: document.getElementById("btn-project-delete-cancel-top"),
 };
 
 function getProjectDisplayName(projectId) {
@@ -1255,8 +1261,6 @@ async function confirmRenameProject() {
 async function deleteProjectById(projectId) {
   if (!projectId) return;
   const displayName = getProjectDisplayName(projectId);
-  const ok = window.confirm(`确认删除项目「${displayName}」吗？该项目全部资源将被永久删除。`);
-  if (!ok) return;
   try {
     await api.delete(`/projects/${projectId}`);
     if (state.currentProjectId === projectId) {
@@ -1268,6 +1272,27 @@ async function deleteProjectById(projectId) {
   } catch (e) {
     setStatus(`删除失败：${e.message}`);
   }
+}
+
+function openDeleteModal(projectId) {
+  if (!el.projectDeleteModal || !el.projectDeleteMessage) return;
+  state.pendingDeleteProjectId = projectId;
+  const displayName = getProjectDisplayName(projectId);
+  el.projectDeleteMessage.textContent = `确认删除项目「${displayName}」吗？该项目的状态、章节、图谱、插图、视频等资源将被永久删除。`;
+  el.projectDeleteModal.hidden = false;
+}
+
+function closeDeleteModal() {
+  if (!el.projectDeleteModal) return;
+  el.projectDeleteModal.hidden = true;
+  state.pendingDeleteProjectId = null;
+}
+
+async function confirmDeleteProject() {
+  const projectId = state.pendingDeleteProjectId;
+  if (!projectId) return;
+  closeDeleteModal();
+  await deleteProjectById(projectId);
 }
 
 async function refreshProjectsAndHideDetail() {
@@ -1919,6 +1944,9 @@ function bindEvents() {
   bindClick(el.btnLoadKbAssets, loadKbAssetsSummary);
   bindClick(el.btnProjectRenameConfirm, confirmRenameProject);
   bindClick(el.btnProjectRenameCancel, closeRenameModal);
+  bindClick(el.btnProjectDeleteConfirm, confirmDeleteProject);
+  bindClick(el.btnProjectDeleteCancel, closeDeleteModal);
+  bindClick(el.btnProjectDeleteCancelTop, closeDeleteModal);
 
   if (el.projectContextMenu) {
     el.projectContextMenu.addEventListener("click", (event) => {
@@ -1931,7 +1959,7 @@ function bindEvents() {
       if (action === "rename") {
         openRenameModal(projectId);
       } else if (action === "delete") {
-        void deleteProjectById(projectId);
+        openDeleteModal(projectId);
       }
     });
   }
@@ -1962,6 +1990,13 @@ function bindEvents() {
       }
     });
   }
+  if (el.projectDeleteModal) {
+    el.projectDeleteModal.addEventListener("click", (event) => {
+      if (event.target && event.target.getAttribute("data-close-delete") === "true") {
+        closeDeleteModal();
+      }
+    });
+  }
   document.addEventListener("click", (event) => {
     if (!el.projectContextMenu || el.projectContextMenu.hidden) return;
     if (el.projectContextMenu.contains(event.target)) return;
@@ -1976,6 +2011,7 @@ function bindEvents() {
       closeCharacterGraphModal();
       closeProjectContextMenu();
       closeRenameModal();
+      closeDeleteModal();
     }
     if (event.key === "Enter" && !el.projectRenameModal.hidden) {
       const target = event.target;

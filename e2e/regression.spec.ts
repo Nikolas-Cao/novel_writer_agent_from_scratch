@@ -815,9 +815,10 @@ test.describe("UI regressions from past chats", () => {
 
     await page.goto("/");
     await expect(page.getByRole("button", { name: /打开 p-delete-target/ })).toBeVisible();
-    page.once("dialog", (dialog) => dialog.accept());
     await page.locator(".project-item").first().click({ button: "right" });
     await page.locator("#project-context-menu button[data-action='delete']").click();
+    await expect(page.locator("#project-delete-modal")).toBeVisible();
+    await page.locator("#btn-project-delete-confirm").click();
     await expect(page.getByRole("button", { name: /打开 p-delete-target/ })).toHaveCount(0);
     await page.locator("#btn-refresh-projects").click();
     await expect(page.getByRole("button", { name: /打开 p-delete-target/ })).toHaveCount(0);

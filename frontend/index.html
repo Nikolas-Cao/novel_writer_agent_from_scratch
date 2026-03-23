@@ -166,6 +166,22 @@
       </div>
     </div>
   </div>
+  <div id="project-delete-modal" class="modal" hidden>
+    <div class="modal-backdrop" data-close-delete="true"></div>
+    <div class="modal-dialog modal-dialog-sm" role="dialog" aria-modal="true" aria-labelledby="project-delete-title">
+      <div class="modal-head">
+        <h3 id="project-delete-title">确认删除项目</h3>
+        <button type="button" id="btn-project-delete-cancel-top" class="btn-modal-close">关闭</button>
+      </div>
+      <div class="modal-content delete-modal-content">
+        <p id="project-delete-message"></p>
+        <div class="row">
+          <button type="button" id="btn-project-delete-cancel">取消</button>
+          <button type="button" id="btn-project-delete-confirm" class="danger-btn">确认删除</button>
+        </div>
+      </div>
+    </div>
+  </div>
   <script src="./app.js"></script>
 </body>
 </html>
