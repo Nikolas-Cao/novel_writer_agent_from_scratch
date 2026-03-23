@@ -694,5 +694,133 @@ test.describe("UI regressions from past chats", () => {
     await expect(page.locator("#character-graph-modal")).toBeVisible();
     await expect(page.locator("#character-graph-modal-content")).toBeVisible();
   });
+
+  test("项目列表右键：应展示自定义菜单", async ({ page }) => {
+    const pid = "p-ctx-menu";
+    await page.route("**/projects", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          projects: [{ project_id: pid, nickname: null, created_at: 1000 }],
+        }),
+      });
+    });
+
+    await page.goto("/");
+    const item = page.locator(".project-item").first();
+    await expect(item).toBeVisible();
+    await item.click({ button: "right" });
+    await expect(page.locator("#project-context-menu")).toBeVisible();
+    await expect(page.locator("#project-context-menu button[data-action='rename']")).toBeVisible();
+    await expect(page.locator("#project-context-menu button[data-action='delete']")).toBeVisible();
+  });
+
+  test("项目重命名：右键后提交昵称，列表优先显示昵称", async ({ page }) => {
+    const pid = "p-rename-target";
+    let nickname = "";
+    await page.route("**/projects**", async (route) => {
+      const req = route.request();
+      const url = new URL(req.url());
+      const method = req.method();
+      const path = url.pathname.replace(/\/$/, "") || "/";
+      if (method === "GET" && path === "/projects") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            projects: [{ project_id: pid, nickname: nickname || null, created_at: 1000 }],
+          }),
+        });
+        return;
+      }
+      if (method === "PATCH" && path === `/projects/${pid}`) {
+        const body = req.postDataJSON() as { nickname?: string | null };
+        nickname = String(body.nickname || "");
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ project_id: pid, nickname }),
+        });
+        return;
+      }
+      if (method === "GET" && path === `/projects/${pid}`) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            project_id: pid,
+            nickname,
+            instruction: "",
+            selected_plot_summary: "",
+            outline_structure: { volumes: [] },
+            chapters: [],
+            current_chapter_index: 0,
+            total_chapters: 100,
+            chapter_word_target: 3000,
+            enable_chapter_illustrations: false,
+            created_at: 1000,
+            token_usage: {},
+          }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    await page.goto("/");
+    const item = page.locator(".project-item").first();
+    await expect(item).toBeVisible();
+    await item.click({ button: "right" });
+    await page.locator("#project-context-menu button[data-action='rename']").click();
+    await page.locator("#project-rename-input").fill("我的第一本书");
+    await page.locator("#btn-project-rename-confirm").click();
+    await expect(page.locator(".project-open-btn").first()).toContainText("我的第一本书");
+    await expect(page.locator(".project-open-btn").first()).toContainText(pid);
+  });
+
+  test("项目删除：右键后确认删除，项目应从列表移除且刷新后仍不存在", async ({ page }) => {
+    const pid = "p-delete-target";
+    let deleted = false;
+    await page.route("**/projects**", async (route) => {
+      const req = route.request();
+      const url = new URL(req.url());
+      const method = req.method();
+      const path = url.pathname.replace(/\/$/, "") || "/";
+      if (method === "GET" && path === "/projects") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            projects: deleted ? [] : [{ project_id: pid, nickname: null, created_at: 1000 }],
+          }),
+        });
+        return;
+      }
+      if (method === "DELETE" && path === `/projects/${pid}`) {
+        deleted = true;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ project_id: pid, deleted: true }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    await page.goto("/");
+    await expect(page.getByRole("button", { name: /打开 p-delete-target/ })).toBeVisible();
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.locator(".project-item").first().click({ button: "right" });
+    await page.locator("#project-context-menu button[data-action='delete']").click();
+    await expect(page.getByRole("button", { name: /打开 p-delete-target/ })).toHaveCount(0);
+    await page.locator("#btn-refresh-projects").click();
+    await expect(page.getByRole("button", { name: /打开 p-delete-target/ })).toHaveCount(0);
+  });
 });
 

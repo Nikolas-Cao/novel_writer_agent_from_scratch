@@ -111,6 +111,10 @@ class CreateProjectRequest(BaseModel):
     selected_kb_ids: Optional[List[str]] = None
 
 
+class PatchProjectRequest(BaseModel):
+    nickname: Optional[str] = None
+
+
 class PatchProjectKnowledgeRequest(BaseModel):
     selected_kb_ids: List[str] = Field(default_factory=list)
 
@@ -153,6 +157,7 @@ class CreateChapterVideoRequest(BaseModel):
 def _default_state(project_id: str) -> Dict[str, Any]:
     return {
         "project_id": project_id,
+        "nickname": None,
         "instruction": "",
         "plot_ideas": [],
         "selected_plot_summary": "",
@@ -440,7 +445,10 @@ def create_app(
         for pid in list_project_ids():
             st = checkpointer.load_state(pid) or {}
             created_at = _project_created_ts(pid, st)
-            results.append({"project_id": pid, "created_at": created_at})
+            nickname = st.get("nickname")
+            if nickname is not None:
+                nickname = str(nickname).strip() or None
+            results.append({"project_id": pid, "created_at": created_at, "nickname": nickname})
         results.sort(key=lambda x: int(x["created_at"]))
         return results
 
@@ -487,22 +495,49 @@ def create_app(
         age_seconds = int(time.time()) - int(created_ts)
         return age_seconds >= EMPTY_PROJECT_GRACE_SECONDS
 
-    def _delete_project_data(project_id: str) -> None:
+    def _delete_project_data(project_id: str) -> List[str]:
+        deleted_paths: List[str] = []
         state_file = states_dir / f"{project_id}.json"
         project_dir = projects_dir / project_id
         project_vector_dir = vector_dir / project_id
 
         if state_file.exists():
             state_file.unlink()
+            deleted_paths.append(str(state_file))
         if project_dir.exists():
             shutil.rmtree(project_dir, ignore_errors=True)
+            deleted_paths.append(str(project_dir))
         if project_vector_dir.exists():
             shutil.rmtree(project_vector_dir, ignore_errors=True)
+            deleted_paths.append(str(project_vector_dir))
+        return deleted_paths
 
     def cleanup_empty_projects() -> None:
         for project_id in list_project_ids():
             if _is_empty_project(project_id):
                 _delete_project_data(project_id)
+
+    async def _cancel_video_tasks_for_project(project_id: str) -> List[str]:
+        cancelled_job_ids: List[str] = []
+        keys = [k for k in list(_video_background_tasks.keys()) if k.startswith(f"{project_id}:")]
+        for key in keys:
+            ev = _video_cancel_events.get(key)
+            if ev:
+                ev.set()
+            task = _video_background_tasks.get(key)
+            if task:
+                task.cancel()
+            cancelled_job_ids.append(key.split(":", 1)[1])
+        for key in keys:
+            task = _video_background_tasks.get(key)
+            if task:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception("Error while waiting video task cancellation: %s", key)
+        return cancelled_job_ids
 
     def chapter_meta_of(state: Dict[str, Any], chapter_index: int) -> Optional[Dict[str, Any]]:
         for item in state.get("chapters", []):
@@ -781,6 +816,7 @@ def create_app(
         state = load_state(project_id)
         return {
             "project_id": project_id,
+            "nickname": state.get("nickname"),
             "instruction": state.get("instruction", ""),
             "selected_plot_summary": state.get("selected_plot_summary", ""),
             "outline_structure": state.get("outline_structure", {"volumes": []}),
@@ -796,6 +832,34 @@ def create_app(
             "canon_overrides": state.get("canon_overrides") or [],
             "character_bible": state.get("character_bible"),
             "chapter_video_outputs": state.get("chapter_video_outputs") or {},
+        }
+
+    @app.patch("/projects/{project_id}")
+    async def patch_project(project_id: str, req: PatchProjectRequest):
+        if not project_exists(project_id):
+            raise HTTPException(status_code=404, detail="project not found")
+        state = load_state(project_id)
+        nickname = req.nickname
+        if nickname is not None:
+            normalized = str(nickname).strip()
+            state["nickname"] = normalized or None
+        save_state(project_id, state)
+        return {
+            "project_id": project_id,
+            "nickname": state.get("nickname"),
+        }
+
+    @app.delete("/projects/{project_id}")
+    async def delete_project(project_id: str):
+        if not project_exists(project_id):
+            raise HTTPException(status_code=404, detail="project not found")
+        cancelled_jobs = await _cancel_video_tasks_for_project(project_id)
+        deleted_paths = _delete_project_data(project_id)
+        return {
+            "project_id": project_id,
+            "deleted": True,
+            "deleted_paths": deleted_paths,
+            "cancelled_video_jobs": cancelled_jobs,
         }
 
     @app.post("/projects/{project_id}/plot-ideas")

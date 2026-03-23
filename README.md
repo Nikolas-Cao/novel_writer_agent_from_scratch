@@ -79,6 +79,7 @@ python -m uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 
 - **（可选）同人知识库**：左侧「同人知识库」创建知识集、上传 `.txt`/`.md`；在**尚未生成大纲**的项目上勾选「绑定当前项目」（或在点击「生成概要」创建新项目前勾好，会随 `POST /projects` 一并提交）；生成大纲后绑定不可改
 - 新建项目：输入创作意图 → 点击 `生成概要`
+- 项目管理：在「项目列表」中对任一项目右键，可执行 `重命名`（设置项目昵称，列表优先显示昵称）和 `删除项目`（硬删除项目全部私有资源）
 - 选概要并生成大纲：选择候选/填写自定义 → 点击 `生成大纲`（章数较多时会多轮调用模型，耗时更长但输出更稳；长耗时接口可带查询参数 **`stream=1` 或 `stream=true`**，返回 NDJSON 进度流，可见分阶段进度）
 - 逐章创作：点击 `续写下一章`（可选勾选 **「开启图片生成」**；如需修改再对“最新章”做反馈重写）
 
@@ -87,6 +88,8 @@ python -m uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 <details><summary>行为说明（与实现对齐）</summary>
 
 - **`GET /projects` 前的空项目清理**：创建超过约 **10 分钟**，且 state 中 **无大纲、无章节**（含磁盘上无章节 `.md`），且 **instruction / plot_ideas / selected_plot_summary 均为空** 的项目会被自动删除，并移除对应 `vector_store/{project_id}` 目录。详见学习指南「后端 API」一节。
+- **项目昵称与显示名**：项目保留内部 ID（`p-uuid`）作为稳定标识，同时支持可选 `nickname`；前端显示规则为 `nickname || project_id`，清空昵称后回退显示 `project_id`。
+- **项目硬删除**：`DELETE /projects/{project_id}` 会删除 `checkpoints/api_state/{project_id}.json`、`projects/{project_id}`（章节/图谱/插图/视频）和 `vector_store/{project_id}`，并尝试取消该项目进行中的视频后台任务。
 - **流式响应**：部分接口支持 `stream` 查询参数；NDJSON 进度通道在服务端使用**无界** `asyncio.Queue`，避免 token 高频进度与慢客户端之间的死锁。**反馈重写**在 `stream=1` 时仅对润色阶段推送正文 token 流（`refine_chapter_stream`），按反馈重写阶段不推送 token 流。
 - **视频任务队列**：`POST /projects/{project_id}/videos/chapters/{index}` 支持同步执行（`async_mode=false`）与异步入队（默认）；可通过 `GET /projects/{project_id}/videos/jobs/{job_id}` 查询状态，`POST /projects/{project_id}/videos/jobs/{job_id}/cancel` 取消任务，完成后用 `GET /projects/{project_id}/videos/chapters/{index}` 读取产物。
 

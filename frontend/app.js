@@ -466,6 +466,8 @@ const state = {
   projectIds: [],
   /** @type {Record<string, number>} */
   projectCreatedAt: {},
+  /** @type {Record<string, string|null>} */
+  projectNicknames: {},
   projectPreviews: {},
   plotIdeas: [],
   selectedIdea: "",
@@ -487,6 +489,7 @@ const state = {
   chapterVideoOutputs: {},
   selectedChapterVideoOutput: null,
   isVideoJobInProgress: false,
+  contextMenuProjectId: null,
 };
 
 const el = {
@@ -536,7 +539,18 @@ const el = {
   kbAssetsKbSelect: document.getElementById("kb-assets-kb-select"),
   btnLoadKbAssets: document.getElementById("btn-load-kb-assets"),
   kbAssetsView: document.getElementById("kb-assets-view"),
+  projectContextMenu: document.getElementById("project-context-menu"),
+  projectRenameModal: document.getElementById("project-rename-modal"),
+  projectRenameInput: document.getElementById("project-rename-input"),
+  btnProjectRenameConfirm: document.getElementById("btn-project-rename-confirm"),
+  btnProjectRenameCancel: document.getElementById("btn-project-rename-cancel"),
 };
+
+function getProjectDisplayName(projectId) {
+  const nickname = state.projectNicknames[projectId];
+  if (nickname && String(nickname).trim()) return String(nickname).trim();
+  return projectId;
+}
 
 function buildChapterCharacterGraphHtml(data, chapterIndex) {
   const graph = (data && data.character_graph) || { nodes: [], edges: [] };
@@ -978,7 +992,9 @@ function renderProjectList(projectIds) {
     btn.className = "project-open-btn";
     const ts = state.projectCreatedAt[projectId];
     const timeLabel = formatCreatedAt(ts);
-    btn.textContent = timeLabel ? `打开 ${projectId}（${timeLabel}）` : `打开 ${projectId}`;
+    const displayName = getProjectDisplayName(projectId);
+    const withId = displayName === projectId ? projectId : `${displayName}（${projectId}）`;
+    btn.textContent = timeLabel ? `打开 ${withId}（${timeLabel}）` : `打开 ${withId}`;
     btn.onclick = () => openProject(projectId);
     head.appendChild(btn);
 
@@ -989,6 +1005,10 @@ function renderProjectList(projectIds) {
       head.appendChild(tag);
     }
     li.appendChild(head);
+    li.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      openProjectContextMenu(projectId, event.clientX, event.clientY);
+    });
 
     if (isSelected) {
       const preview = document.createElement("div");
@@ -1072,12 +1092,17 @@ async function loadProjects() {
     const data = await api.get("/projects");
     const projects = data.projects || [];
     const nextCreated = { ...state.projectCreatedAt };
+    const nextNicknames = { ...state.projectNicknames };
     for (const item of projects) {
       const pid = item && item.project_id;
       if (!pid) continue;
       if (item.created_at != null) nextCreated[pid] = Number(item.created_at);
+      const rawNickname = item && item.nickname;
+      const nickname = rawNickname == null ? null : String(rawNickname).trim() || null;
+      nextNicknames[pid] = nickname;
     }
     state.projectCreatedAt = nextCreated;
+    state.projectNicknames = nextNicknames;
     const projectIds = projects.map((item) => item.project_id).filter(Boolean);
     if (state.currentProjectId && !projectIds.includes(state.currentProjectId)) {
       state.currentProjectId = null;
@@ -1131,6 +1156,9 @@ async function openProject(projectId) {
     }
     state.projectPreviews[projectId] = buildProjectPreview(p);
     if (p.created_at != null) state.projectCreatedAt[projectId] = Number(p.created_at);
+    if (Object.prototype.hasOwnProperty.call(p, "nickname")) {
+      state.projectNicknames[projectId] = p.nickname == null ? null : String(p.nickname).trim() || null;
+    }
     renderProjectList(state.projectIds);
     state.currentProjectKbBindLocked = projectHasOutlineForKbLock(p);
     state.currentProjectKbIds = Array.isArray(p.selected_kb_ids) ? p.selected_kb_ids.map(String) : [];
@@ -1141,7 +1169,9 @@ async function openProject(projectId) {
         : state.currentProjectKbIds.length
           ? `已绑定知识库 ${state.currentProjectKbIds.length} 个`
           : "未绑定知识库";
-    el.projectMeta.textContent = `项目：${projectId} | 目标章节：${p.total_chapters || "-"} | 已生成：${generatedCount}章 | 当前章节：${currentIndexOneBased} | ${kbPart}`;
+    const displayName = getProjectDisplayName(projectId);
+    const projectLabel = displayName === projectId ? projectId : `${displayName}（${projectId}）`;
+    el.projectMeta.textContent = `项目：${projectLabel} | 目标章节：${p.total_chapters || "-"} | 已生成：${generatedCount}章 | 当前章节：${currentIndexOneBased} | ${kbPart}`;
     renderTokenUsage(p);
     renderOutline(p.outline_structure);
     renderChapterList(chapters);
@@ -1168,6 +1198,75 @@ async function openProject(projectId) {
     setDetailPanelVisibility(false);
     setStatus(`打开失败：${e.message}`);
     void loadKnowledgeBases();
+  }
+}
+
+function closeProjectContextMenu() {
+  if (!el.projectContextMenu) return;
+  el.projectContextMenu.hidden = true;
+  state.contextMenuProjectId = null;
+}
+
+function openProjectContextMenu(projectId, clientX, clientY) {
+  if (!el.projectContextMenu) return;
+  state.contextMenuProjectId = projectId;
+  el.projectContextMenu.hidden = false;
+  const menuRect = el.projectContextMenu.getBoundingClientRect();
+  const maxX = Math.max(6, window.innerWidth - menuRect.width - 6);
+  const maxY = Math.max(6, window.innerHeight - menuRect.height - 6);
+  el.projectContextMenu.style.left = `${Math.min(clientX, maxX)}px`;
+  el.projectContextMenu.style.top = `${Math.min(clientY, maxY)}px`;
+}
+
+function openRenameModal(projectId) {
+  if (!el.projectRenameModal || !el.projectRenameInput) return;
+  state.contextMenuProjectId = projectId;
+  const current = state.projectNicknames[projectId];
+  el.projectRenameInput.value = current ? String(current) : "";
+  el.projectRenameModal.hidden = false;
+  window.setTimeout(() => {
+    if (el.projectRenameInput) el.projectRenameInput.focus();
+  }, 0);
+}
+
+function closeRenameModal() {
+  if (!el.projectRenameModal) return;
+  el.projectRenameModal.hidden = true;
+}
+
+async function confirmRenameProject() {
+  const projectId = state.contextMenuProjectId;
+  if (!projectId) return;
+  const nickname = el.projectRenameInput ? String(el.projectRenameInput.value || "").trim() : "";
+  try {
+    await api.patch(`/projects/${projectId}`, { nickname: nickname || null });
+    state.projectNicknames[projectId] = nickname || null;
+    renderProjectList(state.projectIds);
+    if (state.currentProjectId === projectId) {
+      await openProject(projectId);
+    }
+    closeRenameModal();
+    setStatus(nickname ? "项目昵称已更新" : "已恢复显示项目ID");
+  } catch (e) {
+    setStatus(`重命名失败：${e.message}`);
+  }
+}
+
+async function deleteProjectById(projectId) {
+  if (!projectId) return;
+  const displayName = getProjectDisplayName(projectId);
+  const ok = window.confirm(`确认删除项目「${displayName}」吗？该项目全部资源将被永久删除。`);
+  if (!ok) return;
+  try {
+    await api.delete(`/projects/${projectId}`);
+    if (state.currentProjectId === projectId) {
+      await refreshProjectsAndHideDetail();
+    } else {
+      await loadProjects();
+    }
+    setStatus(`项目 ${displayName} 已删除`);
+  } catch (e) {
+    setStatus(`删除失败：${e.message}`);
   }
 }
 
@@ -1818,6 +1917,24 @@ function bindEvents() {
   bindClick(el.btnRefreshKb, loadKnowledgeBases);
   bindClick(el.btnCreateKb, createKnowledgeBase);
   bindClick(el.btnLoadKbAssets, loadKbAssetsSummary);
+  bindClick(el.btnProjectRenameConfirm, confirmRenameProject);
+  bindClick(el.btnProjectRenameCancel, closeRenameModal);
+
+  if (el.projectContextMenu) {
+    el.projectContextMenu.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!target || target.tagName !== "BUTTON") return;
+      const action = target.getAttribute("data-action");
+      const projectId = state.contextMenuProjectId;
+      closeProjectContextMenu();
+      if (!projectId) return;
+      if (action === "rename") {
+        openRenameModal(projectId);
+      } else if (action === "delete") {
+        void deleteProjectById(projectId);
+      }
+    });
+  }
 
   // 防御式兜底：即使未来引入了 form，也避免默认提交触发整页刷新。
   document.addEventListener("submit", (event) => {
@@ -1838,10 +1955,34 @@ function bindEvents() {
       }
     });
   }
+  if (el.projectRenameModal) {
+    el.projectRenameModal.addEventListener("click", (event) => {
+      if (event.target && event.target.getAttribute("data-close-rename") === "true") {
+        closeRenameModal();
+      }
+    });
+  }
+  document.addEventListener("click", (event) => {
+    if (!el.projectContextMenu || el.projectContextMenu.hidden) return;
+    if (el.projectContextMenu.contains(event.target)) return;
+    closeProjectContextMenu();
+  });
+  document.addEventListener("scroll", () => {
+    closeProjectContextMenu();
+  });
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       closeChapterModal();
       closeCharacterGraphModal();
+      closeProjectContextMenu();
+      closeRenameModal();
+    }
+    if (event.key === "Enter" && !el.projectRenameModal.hidden) {
+      const target = event.target;
+      if (target === el.projectRenameInput) {
+        event.preventDefault();
+        void confirmRenameProject();
+      }
     }
   });
   window.addEventListener("resize", () => {

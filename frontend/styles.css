@@ -692,6 +692,59 @@ button:disabled:active {
   overflow-y: auto;
 }
 
+.modal-dialog-sm {
+  width: min(520px, 92vw);
+}
+
+.rename-modal-content {
+  padding: 14px;
+}
+
+#project-rename-input {
+  width: 100%;
+  padding: 10px 11px;
+  border: 1px solid #dbe2ee;
+  border-radius: 12px;
+  outline: none;
+  background: #ffffff;
+}
+
+#project-rename-input:focus {
+  border-color: rgba(15, 23, 42, 0.35);
+  box-shadow: 0 0 0 3px rgba(15, 23, 42, 0.08);
+}
+
+.context-menu {
+  position: fixed;
+  z-index: 1200;
+  min-width: 160px;
+  padding: 6px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.2);
+}
+
+.context-menu button {
+  width: 100%;
+  text-align: left;
+  margin: 0;
+  border: 1px solid transparent !important;
+  border-radius: 8px !important;
+  background: transparent !important;
+  color: #111827 !important;
+  box-shadow: none !important;
+}
+
+.context-menu button:hover {
+  background: #f3f4f6 !important;
+  transform: none !important;
+}
+
+.context-menu button.danger {
+  color: #b91c1c !important;
+}
+
 .panel-detail.has-outline .detail-col::-webkit-scrollbar {
   width: 8px;
 }

@@ -146,6 +146,26 @@
       <div id="character-graph-modal-content" class="modal-content graph-modal-content"></div>
     </div>
   </div>
+  <div id="project-context-menu" class="context-menu" role="menu" hidden>
+    <button type="button" data-action="rename" role="menuitem">重命名</button>
+    <button type="button" data-action="delete" role="menuitem" class="danger">删除项目</button>
+  </div>
+  <div id="project-rename-modal" class="modal" hidden>
+    <div class="modal-backdrop" data-close-rename="true"></div>
+    <div class="modal-dialog modal-dialog-sm" role="dialog" aria-modal="true" aria-labelledby="project-rename-title">
+      <div class="modal-head">
+        <h3 id="project-rename-title">重命名项目</h3>
+        <button type="button" id="btn-project-rename-cancel" class="btn-modal-close">关闭</button>
+      </div>
+      <div class="modal-content rename-modal-content">
+        <label for="project-rename-input">项目昵称（留空则恢复显示项目ID）</label>
+        <input type="text" id="project-rename-input" maxlength="64" placeholder="请输入项目昵称" />
+        <div class="row">
+          <button type="button" id="btn-project-rename-confirm">确认</button>
+        </div>
+      </div>
+    </div>
+  </div>
   <script src="./app.js"></script>
 </body>
 </html>
