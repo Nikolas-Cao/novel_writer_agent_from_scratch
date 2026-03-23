@@ -780,7 +780,7 @@ test.describe("UI regressions from past chats", () => {
     await page.locator("#project-rename-input").fill("我的第一本书");
     await page.locator("#btn-project-rename-confirm").click();
     await expect(page.locator(".project-open-btn").first()).toContainText("我的第一本书");
-    await expect(page.locator(".project-open-btn").first()).toContainText(pid);
+    await expect(page.locator(".project-open-btn").first()).not.toContainText(pid);
   });
 
   test("项目删除：右键后确认删除，项目应从列表移除且刷新后仍不存在", async ({ page }) => {

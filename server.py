@@ -41,7 +41,7 @@ from memory import LocalFileCheckpointer
 from rag import LocalRagIndexer, LocalRagRetriever
 from rag.global_kb_chroma import GlobalKbChroma
 from rag.global_kb_retriever import GlobalKbRetriever
-from storage import ChapterStore, CharacterGraphStore
+from storage import ChapterStore, CharacterGraphStore, EventLogStore
 from video_pipeline import build_default_character_bible, run_chapter_video_pipeline
 from video_pipeline.providers import GenericCloudTTSProvider, GenericCloudVideoProvider
 from video_pipeline.storage import VideoAssetStore
@@ -246,6 +246,7 @@ def create_app(
 
     chapter_store = ChapterStore(root=projects_dir)
     graph_store = CharacterGraphStore(root=projects_dir)
+    event_store = EventLogStore(root=projects_dir)
     rag_indexer = LocalRagIndexer(root=vector_dir)
     rag_retriever = LocalRagRetriever(root=vector_dir)
     checkpointer = LocalFileCheckpointer(root=states_dir)
@@ -266,6 +267,36 @@ def create_app(
 
     def _video_cancel_key(project_id: str, job_id: str) -> str:
         return f"{project_id}:{job_id}"
+
+    def _truncate_event_text(text: Any, max_len: int = 100) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        compact = " ".join(raw.split())
+        if len(compact) <= max_len:
+            return compact
+        return compact[: max_len - 3] + "..."
+
+    def emit_project_event(
+        project_id: str,
+        *,
+        event_name: str,
+        event_content: str,
+        chapter_index: Optional[int] = None,
+        status: str = "success",
+    ) -> None:
+        event_store.append_event(
+            project_id,
+            {
+                "event_id": f"evt-{uuid.uuid4().hex[:16]}",
+                "ts": int(time.time()),
+                "project_id": project_id,
+                "chapter_index": int(chapter_index) if chapter_index is not None else None,
+                "event_name": event_name,
+                "event_content": _truncate_event_text(event_content),
+                "status": status,
+            },
+        )
 
     def _ensure_video_state(state: Dict[str, Any], project_id: str) -> None:
         if not state.get("character_bible"):
@@ -834,6 +865,16 @@ def create_app(
             "chapter_video_outputs": state.get("chapter_video_outputs") or {},
         }
 
+    @app.get("/projects/{project_id}/events")
+    async def list_project_events(project_id: str, chapter_index: Optional[int] = None, limit: int = Query(200)):
+        if not project_exists(project_id):
+            raise HTTPException(status_code=404, detail="project not found")
+        events = event_store.list_events(project_id, chapter_index=chapter_index, limit=int(limit))
+        return {
+            "project_id": project_id,
+            "events": events,
+        }
+
     @app.patch("/projects/{project_id}")
     async def patch_project(project_id: str, req: PatchProjectRequest):
         if not project_exists(project_id):
@@ -870,16 +911,35 @@ def create_app(
         async def _run_plot_ideas(emit: ProgressFn) -> Dict[str, Any]:
             state = load_state(project_id)
             state["instruction"] = req.instruction
+            instruction_brief = _truncate_event_text(req.instruction)
+            emit_project_event(
+                project_id,
+                event_name="generate_plot_ideas",
+                event_content=f"根据{instruction_brief}生成概要",
+                status="start",
+            )
             tp, tw = _tracked(state)
             logger.info("[生成剧情概要] start project=%s", project_id)
             await emit("plot_ideas", "正在生成剧情概要候选（LLM）…")
             try:
                 out = await generate_plot_ideas_node(state, llm=tp)
             except Exception as exc:
+                emit_project_event(
+                    project_id,
+                    event_name="generate_plot_ideas",
+                    event_content=f"根据{instruction_brief}生成概要失败：{_truncate_event_text(str(exc))}",
+                    status="error",
+                )
                 raise_llm_http_error(exc, scene="生成剧情概要")
                 raise
             state.update(out)
             save_state(project_id, state)
+            emit_project_event(
+                project_id,
+                event_name="generate_plot_ideas",
+                event_content=f"根据{instruction_brief}生成概要",
+                status="success",
+            )
             logger.info("[生成剧情概要] done project=%s ideas=%s", project_id, len(state.get("plot_ideas", [])))
             return {"plot_ideas": state.get("plot_ideas", [])}
 
@@ -895,6 +955,13 @@ def create_app(
         async def _run_outline(emit: ProgressFn) -> Dict[str, Any]:
             state = load_state(project_id)
             state["selected_plot_summary"] = req.selected_plot_summary
+            summary_brief = _truncate_event_text(req.selected_plot_summary)
+            emit_project_event(
+                project_id,
+                event_name="generate_outline",
+                event_content=f"根据{summary_brief}生成大纲",
+                status="start",
+            )
             if req.total_chapters is not None:
                 state["total_chapters"] = int(req.total_chapters)
             tp, tw = _tracked(state)
@@ -916,11 +983,23 @@ def create_app(
                     kb_context=kb_context or None,
                 )
             except Exception as exc:
+                emit_project_event(
+                    project_id,
+                    event_name="generate_outline",
+                    event_content=f"根据{summary_brief}生成大纲失败：{_truncate_event_text(str(exc))}",
+                    status="error",
+                )
                 raise_llm_http_error(exc, scene="生成大纲")
                 raise
             state.update(out)
             await emit("persist", "正在保存大纲并写入 RAG 索引…")
             save_state(project_id, state)
+            emit_project_event(
+                project_id,
+                event_name="generate_outline",
+                event_content=f"根据{summary_brief}生成大纲",
+                status="success",
+            )
             vols = (state.get("outline_structure") or {}).get("volumes") or []
             logger.info("[生成大纲] done project=%s volumes=%s", project_id, len(vols))
             return {
@@ -983,6 +1062,7 @@ def create_app(
 
             chapters = state.get("chapters", [])
             next_idx = max([int(c.get("index", -1)) for c in chapters], default=-1) + 1
+            chapter_no = next_idx + 1
             state["current_chapter_index"] = next_idx
             if req.chapter_word_target is not None:
                 state["chapter_word_target"] = int(req.chapter_word_target)
@@ -995,17 +1075,41 @@ def create_app(
                 tu = state.setdefault("token_usage", {})
                 tw_stream = TokenTrackingLLM(writer_streaming, tu)
             logger.info("[续写下一章] start project=%s next_index=%s", project_id, next_idx)
-            await emit("chapter_pipeline", f"开始续写第 {next_idx + 1} 章…")
-            await generate_chapter_for_current_index(
-                state,
-                scene="续写下一章",
-                tp=tp,
-                tw=tw,
-                tw_stream=tw_stream,
-                emit_progress=emit,
-                stream_llm_output=bool(stream),
+            emit_project_event(
+                project_id,
+                event_name="write_next_chapter",
+                event_content=f"续写第{chapter_no}章",
+                chapter_index=next_idx,
+                status="start",
             )
+            await emit("chapter_pipeline", f"开始续写第 {next_idx + 1} 章…")
+            try:
+                await generate_chapter_for_current_index(
+                    state,
+                    scene="续写下一章",
+                    tp=tp,
+                    tw=tw,
+                    tw_stream=tw_stream,
+                    emit_progress=emit,
+                    stream_llm_output=bool(stream),
+                )
+            except Exception as exc:
+                emit_project_event(
+                    project_id,
+                    event_name="write_next_chapter",
+                    event_content=f"续写第{chapter_no}章失败：{_truncate_event_text(str(exc))}",
+                    chapter_index=next_idx,
+                    status="error",
+                )
+                raise
             save_state(project_id, state)
+            emit_project_event(
+                project_id,
+                event_name="write_next_chapter",
+                event_content=f"续写第{chapter_no}章",
+                chapter_index=next_idx,
+                status="success",
+            )
 
             meta = chapter_meta_of(state, next_idx)
             content = chapter_store.load(project_id, next_idx)
@@ -1141,6 +1245,15 @@ def create_app(
             state["current_chapter_index"] = int(index)
             state["current_chapter_final"] = chapter_text
             state["user_feedback"] = req.user_feedback
+            feedback_brief = _truncate_event_text(req.user_feedback)
+            chapter_no = int(index) + 1
+            emit_project_event(
+                project_id,
+                event_name="rewrite_chapter_with_feedback",
+                event_content=f"用户反馈{feedback_brief}，并重新生成第{chapter_no}章",
+                chapter_index=int(index),
+                status="start",
+            )
             state["update_outline_on_feedback"] = bool(req.update_outline)
             if req.enable_chapter_illustrations is not None:
                 state["enable_chapter_illustrations"] = bool(req.enable_chapter_illustrations)
@@ -1199,9 +1312,23 @@ def create_app(
                 )
                 state.update(out)
             except Exception as exc:
+                emit_project_event(
+                    project_id,
+                    event_name="rewrite_chapter_with_feedback",
+                    event_content=f"用户反馈{feedback_brief}，并重新生成第{chapter_no}章失败：{_truncate_event_text(str(exc))}",
+                    chapter_index=int(index),
+                    status="error",
+                )
                 raise_llm_http_error(exc, scene="反馈重写")
                 raise
             save_state(project_id, state)
+            emit_project_event(
+                project_id,
+                event_name="rewrite_chapter_with_feedback",
+                event_content=f"用户反馈{feedback_brief}，并重新生成第{chapter_no}章",
+                chapter_index=int(index),
+                status="success",
+            )
 
             new_text = chapter_store.load(project_id, index)
             logger.info("[反馈重写] done project=%s chapter_index=%s", project_id, index)

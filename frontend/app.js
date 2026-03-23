@@ -491,6 +491,7 @@ const state = {
   isVideoJobInProgress: false,
   contextMenuProjectId: null,
   pendingDeleteProjectId: null,
+  expandedEventIndex: null,
 };
 
 const el = {
@@ -514,12 +515,16 @@ const el = {
   chapterModalContent: document.getElementById("chapter-modal-content"),
   characterGraphModal: document.getElementById("character-graph-modal"),
   characterGraphModalContent: document.getElementById("character-graph-modal-content"),
+  eventLogModal: document.getElementById("event-log-modal"),
+  eventLogModalContent: document.getElementById("event-log-modal-content"),
   btnViewChapterModal: document.getElementById("btn-view-chapter-modal"),
   btnViewCharacterGraphModal: document.getElementById("btn-view-character-graph-modal"),
+  btnViewEventLogs: document.getElementById("btn-view-event-logs"),
   btnCreateAiVideo: document.getElementById("btn-create-ai-video"),
   btnViewAiVideo: document.getElementById("btn-view-ai-video"),
   btnCloseChapterModal: document.getElementById("btn-close-chapter-modal"),
   btnCloseCharacterGraphModal: document.getElementById("btn-close-character-graph-modal"),
+  btnCloseEventLogModal: document.getElementById("btn-close-event-log-modal"),
   feedbackRewriteSection: document.getElementById("feedback-rewrite-section"),
   feedback: document.getElementById("feedback-input"),
   updateOutline: document.getElementById("update-outline-checkbox"),
@@ -999,8 +1004,7 @@ function renderProjectList(projectIds) {
     const ts = state.projectCreatedAt[projectId];
     const timeLabel = formatCreatedAt(ts);
     const displayName = getProjectDisplayName(projectId);
-    const withId = displayName === projectId ? projectId : `${displayName}（${projectId}）`;
-    btn.textContent = timeLabel ? `打开 ${withId}（${timeLabel}）` : `打开 ${withId}`;
+    btn.textContent = timeLabel ? `打开 ${displayName}（${timeLabel}）` : `打开 ${displayName}`;
     btn.onclick = () => openProject(projectId);
     head.appendChild(btn);
 
@@ -1176,8 +1180,7 @@ async function openProject(projectId) {
           ? `已绑定知识库 ${state.currentProjectKbIds.length} 个`
           : "未绑定知识库";
     const displayName = getProjectDisplayName(projectId);
-    const projectLabel = displayName === projectId ? projectId : `${displayName}（${projectId}）`;
-    el.projectMeta.textContent = `项目：${projectLabel} | 目标章节：${p.total_chapters || "-"} | 已生成：${generatedCount}章 | 当前章节：${currentIndexOneBased} | ${kbPart}`;
+    el.projectMeta.textContent = `项目：${displayName} | 目标章节：${p.total_chapters || "-"} | 已生成：${generatedCount}章 | 当前章节：${currentIndexOneBased} | ${kbPart}`;
     renderTokenUsage(p);
     renderOutline(p.outline_structure);
     renderChapterList(chapters);
@@ -1537,6 +1540,68 @@ async function openCharacterGraphModal() {
 function closeCharacterGraphModal() {
   if (!el.characterGraphModal) return;
   el.characterGraphModal.hidden = true;
+}
+
+function renderEventLogs(events) {
+  if (!el.eventLogModalContent) return;
+  const rows = Array.isArray(events) ? events : [];
+  if (!rows.length) {
+    el.eventLogModalContent.innerHTML = '<p class="event-log-empty">暂无事件日志</p>';
+    return;
+  }
+  const list = document.createElement("div");
+  list.className = "event-log-list";
+  rows.forEach((evt, idx) => {
+    const card = document.createElement("article");
+    card.className = "event-log-card";
+    if (state.expandedEventIndex === idx) card.classList.add("expanded");
+    const chapterLabel =
+      Number.isFinite(Number(evt.chapter_index)) && Number(evt.chapter_index) >= 0
+        ? `第 ${Number(evt.chapter_index) + 1} 章`
+        : "项目级";
+    const status = String(evt.status || "success");
+    const ts = Number(evt.ts);
+    const timeText = Number.isFinite(ts) && ts > 0 ? formatCreatedAt(ts) : "未知时间";
+    const eventName = escapeHtml(String(evt.event_name || "event"));
+    const content = escapeHtml(String(evt.event_content || ""));
+    card.innerHTML = `
+      <div class="event-log-card-head">
+        <strong>${eventName}</strong>
+        <span class="event-log-status">${escapeHtml(status)}</span>
+      </div>
+      <div class="event-log-card-meta">${escapeHtml(timeText)} · ${escapeHtml(chapterLabel)}</div>
+      <div class="event-log-card-content">${content || "（无内容）"}</div>
+    `;
+    card.addEventListener("click", () => {
+      state.expandedEventIndex = state.expandedEventIndex === idx ? null : idx;
+      renderEventLogs(rows);
+    });
+    list.appendChild(card);
+  });
+  el.eventLogModalContent.innerHTML = "";
+  el.eventLogModalContent.appendChild(list);
+}
+
+async function openEventLogModal() {
+  if (!el.eventLogModal || !el.eventLogModalContent) return;
+  if (!state.currentProjectId) {
+    setStatus("请先创建或打开项目");
+    return;
+  }
+  state.expandedEventIndex = null;
+  el.eventLogModalContent.innerHTML = "<p>事件日志加载中...</p>";
+  el.eventLogModal.hidden = false;
+  try {
+    const data = await api.get(`/projects/${state.currentProjectId}/events?limit=200`);
+    renderEventLogs((data && data.events) || []);
+  } catch (e) {
+    el.eventLogModalContent.innerHTML = `<p class="event-log-empty">加载失败：${escapeHtml(e.message || "未知错误")}</p>`;
+  }
+}
+
+function closeEventLogModal() {
+  if (!el.eventLogModal) return;
+  el.eventLogModal.hidden = true;
 }
 
 /**
@@ -1937,8 +2002,10 @@ function bindEvents() {
   bindClick(el.btnViewAiVideo, viewAiVideoForSelectedChapter);
   bindClick(el.btnViewChapterModal, openChapterModal);
   bindClick(el.btnViewCharacterGraphModal, openCharacterGraphModal);
+  bindClick(el.btnViewEventLogs, openEventLogModal);
   bindClick(el.btnCloseChapterModal, closeChapterModal);
   bindClick(el.btnCloseCharacterGraphModal, closeCharacterGraphModal);
+  bindClick(el.btnCloseEventLogModal, closeEventLogModal);
   bindClick(el.btnRefreshKb, loadKnowledgeBases);
   bindClick(el.btnCreateKb, createKnowledgeBase);
   bindClick(el.btnLoadKbAssets, loadKbAssetsSummary);
@@ -1983,6 +2050,13 @@ function bindEvents() {
       }
     });
   }
+  if (el.eventLogModal) {
+    el.eventLogModal.addEventListener("click", (event) => {
+      if (event.target && event.target.getAttribute("data-close-event-log") === "true") {
+        closeEventLogModal();
+      }
+    });
+  }
   if (el.projectRenameModal) {
     el.projectRenameModal.addEventListener("click", (event) => {
       if (event.target && event.target.getAttribute("data-close-rename") === "true") {
@@ -2009,6 +2083,7 @@ function bindEvents() {
     if (event.key === "Escape") {
       closeChapterModal();
       closeCharacterGraphModal();
+      closeEventLogModal();
       closeProjectContextMenu();
       closeRenameModal();
       closeDeleteModal();

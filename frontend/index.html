@@ -93,6 +93,7 @@
           <div class="row">
             <button type="button" id="btn-view-chapter-modal">弹窗查看章节全文</button>
             <button type="button" id="btn-view-character-graph-modal">弹窗查看人物关系</button>
+            <button type="button" id="btn-view-event-logs">查看事件日志</button>
           </div>
           <div class="row">
             <button type="button" id="btn-create-ai-video">创建AI视频（覆盖当前章）</button>
@@ -144,6 +145,16 @@
         <button type="button" id="btn-close-character-graph-modal" class="btn-modal-close">关闭</button>
       </div>
       <div id="character-graph-modal-content" class="modal-content graph-modal-content"></div>
+    </div>
+  </div>
+  <div id="event-log-modal" class="modal" hidden>
+    <div class="modal-backdrop" data-close-event-log="true"></div>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="event-log-modal-title">
+      <div class="modal-head">
+        <h3 id="event-log-modal-title">项目事件日志</h3>
+        <button type="button" id="btn-close-event-log-modal" class="btn-modal-close">关闭</button>
+      </div>
+      <div id="event-log-modal-content" class="modal-content"></div>
     </div>
   </div>
   <div id="project-context-menu" class="context-menu" role="menu" hidden>
