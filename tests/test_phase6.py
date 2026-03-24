@@ -41,6 +41,27 @@ def _front_fake_expand_batch(prompt: str) -> str:
     return json.dumps({"chapters": chapters}, ensure_ascii=False)
 
 
+def _front_fake_extend_window(prompt: str) -> str:
+    m = re.search(r"本次新增区间[：:]\s*(\d+)\.\.(\d+)", prompt)
+    s = int(m.group(1)) if m else 0
+    e = int(m.group(2)) if m else s
+    chapters = []
+    for g in range(s, e + 1):
+        chapters.append(
+            {
+                "global_index": g,
+                "title": f"第{g + 1}章",
+                "beat": f"beat{g}",
+                "points": [f"p1-{g}", f"p2-{g}"],
+                "depends_on": [g - 1] if g > 0 else [],
+                "carry_forward": [],
+                "new_threads": [],
+                "resolved_threads": [],
+            }
+        )
+    return json.dumps({"chapters": chapters, "repairs": []}, ensure_ascii=False)
+
+
 class FrontPlannerLLM:
     async def ainvoke(self, prompt: str):
         if "plot_ideas" in prompt:
@@ -51,6 +72,8 @@ class FrontPlannerLLM:
             m = re.search(r"目标章节数[：:]\s*(\d+)", prompt)
             n = int(m.group(1)) if m else 12
             return _Resp(_front_fake_skeleton_volumes(n))
+        if "【plan_outline_extend_window】" in prompt:
+            return _Resp(_front_fake_extend_window(prompt))
         if "【plan_outline_single】" in prompt and '"volumes"' in prompt:
             return _Resp(
                 '{"volumes":[{"volume_title":"第一卷","chapters":[{"title":"第一章 雨夜","points":["案发","主角入局"]},{"title":"第二章 追踪","points":["线索扩展"]}]}]}'
@@ -99,6 +122,7 @@ def test_frontend_assets_and_page():
     assert "新建小说" in html
     assert "项目详情" in html
     assert "章节正文（Markdown 渲染）" in html
+    assert 'id="btn-generate-outline-range"' in html
 
     r = client.get("/assets/app.js")
     assert r.status_code == 200
@@ -144,6 +168,10 @@ def test_frontend_backend_flow_via_api():
     r = client.post(f"/projects/{pid}/outline", json={"selected_plot_summary": ideas[0]})
     assert r.status_code == 200
     assert r.json()["outline_structure"]["volumes"]
+
+    r = client.post(f"/projects/{pid}/outline/window", json={})
+    assert r.status_code == 200
+    assert isinstance(r.json().get("outline_extended_indices"), list)
 
     r = client.post(f"/projects/{pid}/chapters/next", json={})
     assert r.status_code == 200

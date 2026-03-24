@@ -50,12 +50,36 @@ def _fake_expand_batch(prompt: str) -> str:
     return json.dumps({"chapters": chapters}, ensure_ascii=False)
 
 
+def _fake_extend_window(prompt: str) -> str:
+    m = re.search(r"本次新增区间：(\d+)\.\.(\d+)", prompt)
+    s = int(m.group(1)) if m else 0
+    e = int(m.group(2)) if m else s
+    chapters = []
+    for g in range(s, e + 1):
+        chapters.append(
+            {
+                "global_index": g,
+                "title": f"第{g + 1}章",
+                "beat": f"延展节拍{g}",
+                "points": [f"wA-{g}", f"wB-{g}", f"wC-{g}"],
+                "depends_on": [g - 1] if g > 0 else [],
+                "carry_forward": [f"线索{g}"],
+                "new_threads": [],
+                "resolved_threads": [],
+            }
+        )
+    repairs = [{"global_index": s - 1, "points": [f"repair-{s - 1}"]}] if s > 0 else []
+    return json.dumps({"chapters": chapters, "repairs": repairs}, ensure_ascii=False)
+
+
 class ApiPlannerLLM:
     async def ainvoke(self, prompt: str):
         if "plot_ideas" in prompt:
             return _Resp(
                 '{"plot_ideas":["概要A：雨城连环失踪案。","概要B：机械城阴谋。"]}'
             )
+        if "【plan_outline_extend_window】" in prompt:
+            return _Resp(_fake_extend_window(prompt))
         if "【plan_outline_expand_batch】" in prompt:
             return _Resp(_fake_expand_batch(prompt))
         if "【plan_outline_skeleton】" in prompt:
@@ -89,6 +113,13 @@ class ApiWriterLLM:
                 return _Resp("# 第一章 雨夜\n\n润色后仍保留悬疑收束，氛围更紧。")
             return _Resp("# 第一章 雨夜\n\n润色后的章节内容，氛围更紧张。")
         return _Resp("# 第一章 雨夜\n\n初稿章节内容。")
+
+
+class ApiPlannerLLMFailExtend(ApiPlannerLLM):
+    async def ainvoke(self, prompt: str):
+        if "【plan_outline_extend_window】" in prompt:
+            raise RuntimeError("extend failed intentionally")
+        return await super().ainvoke(prompt)
 
 
 def test_phase5_api_flow():
@@ -185,39 +216,104 @@ def test_phase5_api_flow():
 
 
 def test_phase5_outline_multi_phase_api():
-    from graph.nodes.plan_outline import PLAN_OUTLINE_SINGLE_CALL_MAX
     from server import create_app
+    from server import OUTLINE_INITIAL_CHAPTERS as DEFAULT_INITIAL
+    import server as server_module
 
     root = _tmp_root()
-    app = create_app(
-        planner_llm=ApiPlannerLLM(),
-        writer_llm=ApiWriterLLM(),
-        projects_root=root / "projects",
-        vector_root=root / "vector",
-        checkpoint_root=root / "states",
-    )
-    client = TestClient(app)
-    n = PLAN_OUTLINE_SINGLE_CALL_MAX + 3
-    r = client.post("/projects", json={"instruction": "长篇 API", "total_chapters": n})
-    assert r.status_code == 200
-    pid = r.json()["project_id"]
-    r = client.post(f"/projects/{pid}/plot-ideas", json={"instruction": "长篇 API"})
-    assert r.status_code == 200
-    ideas = r.json()["plot_ideas"]
-    r = client.post(
-        f"/projects/{pid}/outline",
-        json={"selected_plot_summary": ideas[0], "total_chapters": n},
-    )
-    assert r.status_code == 200
-    vols = r.json()["outline_structure"]["volumes"]
-    total = sum(len(v.get("chapters") or []) for v in vols)
-    assert total == n
-    shutil.rmtree(root, ignore_errors=True)
+    try:
+        server_module.OUTLINE_INITIAL_CHAPTERS = 20
+        app = create_app(
+            planner_llm=ApiPlannerLLM(),
+            writer_llm=ApiWriterLLM(),
+            projects_root=root / "projects",
+            vector_root=root / "vector",
+            checkpoint_root=root / "states",
+        )
+        client = TestClient(app)
+        n = 23
+        r = client.post("/projects", json={"instruction": "长篇 API", "total_chapters": n})
+        assert r.status_code == 200
+        pid = r.json()["project_id"]
+        r = client.post(f"/projects/{pid}/plot-ideas", json={"instruction": "长篇 API"})
+        assert r.status_code == 200
+        ideas = r.json()["plot_ideas"]
+        r = client.post(
+            f"/projects/{pid}/outline",
+            json={"selected_plot_summary": ideas[0], "total_chapters": n},
+        )
+        assert r.status_code == 200
+        vols = r.json()["outline_structure"]["volumes"]
+        total = sum(len(v.get("chapters") or []) for v in vols)
+        assert total == 20
+
+        # 写到第 21 章时触发自动扩窗
+        for i in range(21):
+            r = client.post(f"/projects/{pid}/chapters/next", json={})
+            assert r.status_code == 200
+            assert r.json()["chapter_index"] == i
+        r = client.get(f"/projects/{pid}")
+        assert r.status_code == 200
+        after = r.json()["outline_structure"]["volumes"]
+        after_total = sum(len(v.get("chapters") or []) for v in after)
+        assert after_total >= 21
+    finally:
+        server_module.OUTLINE_INITIAL_CHAPTERS = DEFAULT_INITIAL
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_phase5_extend_failure_not_persisted():
+    from server import create_app
+    from server import OUTLINE_INITIAL_CHAPTERS as DEFAULT_INITIAL
+    import server as server_module
+
+    root = _tmp_root()
+    try:
+        server_module.OUTLINE_INITIAL_CHAPTERS = 1
+        app = create_app(
+            planner_llm=ApiPlannerLLMFailExtend(),
+            writer_llm=ApiWriterLLM(),
+            projects_root=root / "projects",
+            vector_root=root / "vector",
+            checkpoint_root=root / "states",
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+        n = 3
+        r = client.post("/projects", json={"instruction": "长篇 API", "total_chapters": n})
+        assert r.status_code == 200
+        pid = r.json()["project_id"]
+        r = client.post(f"/projects/{pid}/plot-ideas", json={"instruction": "长篇 API"})
+        assert r.status_code == 200
+        ideas = r.json()["plot_ideas"]
+        r = client.post(
+            f"/projects/{pid}/outline",
+            json={"selected_plot_summary": ideas[0], "total_chapters": n},
+        )
+        assert r.status_code == 200
+        before = client.get(f"/projects/{pid}").json()
+        before_total = sum(len(v.get("chapters") or []) for v in before["outline_structure"]["volumes"])
+        assert before_total == 2
+        assert int(before.get("current_chapter_index", 0)) == 0
+
+        r = client.post(f"/projects/{pid}/chapters/next", json={})
+        assert r.status_code == 200
+        r = client.post(f"/projects/{pid}/chapters/next", json={})
+        assert r.status_code == 200
+        r = client.post(f"/projects/{pid}/chapters/next", json={})
+        assert r.status_code >= 500
+
+        after = client.get(f"/projects/{pid}").json()
+        after_total = sum(len(v.get("chapters") or []) for v in after["outline_structure"]["volumes"])
+        assert after_total == 2
+    finally:
+        server_module.OUTLINE_INITIAL_CHAPTERS = DEFAULT_INITIAL
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def run_all():
     test_phase5_api_flow()
     test_phase5_outline_multi_phase_api()
+    test_phase5_extend_failure_not_persisted()
     print("Phase 5 acceptance: all passed.")
 
 

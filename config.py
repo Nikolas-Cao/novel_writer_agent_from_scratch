@@ -11,6 +11,14 @@ try:
 except ImportError:
     pass
 
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    """读取布尔环境变量，兼容常见真值写法。"""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
 # ----- 模型与 API（环境变量） -----
 _default_model = os.getenv("MODEL") or "deepseek-r1:8b"
 _default_base_url = os.getenv("BASE_URL") or "http://localhost:11434/v1"
@@ -48,6 +56,7 @@ _project_root = Path(__file__).resolve().parent
 PROJECTS_ROOT = Path(os.getenv("PROJECTS_ROOT", str(_project_root / "projects")))
 CHECKPOINT_DIR = Path(os.getenv("CHECKPOINT_DIR", str(_project_root / "checkpoints")))
 VECTOR_STORE_DIR = Path(os.getenv("VECTOR_STORE_DIR", str(_project_root / "vector_store")))
+DEBUG = _env_bool("DEBUG", default=False)
 
 # 目录约定（文档用）：每个项目对应 PROJECTS_ROOT/{project_id}/，
 # 其下可有 chapters/、images/、character_graph.json；

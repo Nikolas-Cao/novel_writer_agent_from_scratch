@@ -12,6 +12,11 @@ class OutlineChapterItem(TypedDict, total=False):
     title: str
     points: List[str]          # 3～5 句本章要点
     conflict: Optional[str]    # 关键冲突/伏笔
+    beat: Optional[str]        # 本章节拍一句话
+    depends_on: List[int]      # 承接的前文章节索引
+    carry_forward: List[str]   # 延续线索
+    new_threads: List[str]     # 新引入线索
+    resolved_threads: List[str]  # 本章收束线索
 
 
 class OutlineVolume(TypedDict):
@@ -102,6 +107,13 @@ class NovelProjectState(TypedDict, total=False):
     user_feedback: str
     last_rewrite_draft: str
     total_chapters: int
+    outline_generated_until: int  # 已生成到的全局章索引（含）
+    outline_window_size: int      # 扩窗章节数
+    outline_initial_chapters: int  # 初始大纲章节数
+    outline_mode: str              # short|long
+    outline_seed_done: bool        # 首窗是否完成
+    outline_extended_indices: List[int]  # 本轮扩窗影响的章节索引
+    last_written_chapter_index: int  # 已写正文的最大章节索引（用于禁回修）
     chapter_word_target: int
     project_id: str
     chapter_output_format: str   # 如 "markdown"

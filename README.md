@@ -45,10 +45,14 @@ copy .env-sample .env
 - `RAG_PREVIOUS_CHAPTERS`：写章时检索前文章节摘要数量（默认 5）
 - `CHARACTER_GRAPH_RECENT_CHAPTERS`：写章时人物关系摘要的章节滑窗宽度（默认 5）
 - `IMAGE_GEN_API_KEY` / `IMAGE_GEN_BASE_URL` / `IMAGE_GEN_MODEL` / `IMAGE_GEN_SIZE` / `IMAGE_GEN_TIMEOUT_S`：章节插图走 OpenAI Images（`IMAGE_GEN_API_KEY` 默认可回退 `OPENAI_API_KEY` / `PLANNER_API_KEY`）；生图失败则本张插图跳过
-- `PLAN_OUTLINE_SINGLE_CALL_MAX`：超过该章节数则大纲改为「骨架 + 分批扩写」多轮 LLM（默认 16）
-- `PLAN_OUTLINE_BATCH_SIZE`：大纲分批扩写时每批章节数（默认 10）
+- `PLAN_OUTLINE_SINGLE_CALL_MAX`：超过该章节数则长篇大纲改为「极简骨架 + 滚动扩窗」策略（默认 16）
+- `OUTLINE_REPAIR_BACK_CHAPTERS`：扩窗时允许回修的前置章节数上限（默认 3；已写正文章节自动禁回修）
 - `PLAN_OUTLINE_LARGE_BOOK_CHAPTERS`：达到该章节数后每章要点条数降为 2～3（默认 40）
+- `OUTLINE_INITIAL_CHAPTERS`：初始化大纲时先生成前 N 章（默认 20）
+- `OUTLINE_WINDOW_SIZE`：续写过程中每次自动补齐的大纲窗口大小（默认 10）
+- `OUTLINE_TRIGGER_MARGIN`：距离已生成大纲边界多少章时触发自动补窗（默认 0）
 - `PROJECTS_ROOT` / `CHECKPOINT_DIR` / `VECTOR_STORE_DIR`：本地落盘根路径（默认分别为仓库下 `projects/`、`checkpoints/`、`vector_store/`）。**章节与人物图谱等在 `projects/{project_id}/`，Chroma 向量库在 `vector_store/{project_id}/`，API 状态 JSON 在 `checkpoints/api_state/{project_id}.json`**，与 `docs/项目实现学习指南.md` 一致。
+- `DEBUG`：设为 `true/1/yes/on` 时，记录每次文本 LLM 调用到 `projects/{project_id}/llm_invoke_results/`。文件名为 `{utc_timestamp}_{status}_{purpose}_{short_id}.json`（`status=success/error`，`purpose` 为细粒度业务目的）。流式调用会在结束后聚合完整输出再写入单个 JSON。
 - **全局知识库摄取与检索**：`KB_CHUNK_TARGET_CHARS` / `KB_CHUNK_OVERLAP_CHARS` / `KB_INGEST_BATCH_CHUNKS` / `KB_READ_BLOCK_BYTES` / `KB_MAX_CHUNKS_PER_DOCUMENT`；摘要资产 map-reduce：`KB_ASSET_LEAF_BATCH_CHARS` / `KB_ASSET_MAX_LEAF_WINDOWS`；检索：`KB_RETRIEVE_CHROMA_K` / `KB_RETRIEVE_FTS_K` / `KB_RETRIEVE_FINAL_K`；低置信度补查：`KB_TOOL_LOOP_MAX_CALLS`（详见 `config.py`）。
 - **章节视频与语音（云端 API）**：`VIDEO_PROVIDER` / `VIDEO_API_BASE_URL` / `VIDEO_API_KEY` / `VIDEO_MODEL` / `VIDEO_TIMEOUT_S` / `VIDEO_MAX_RETRIES` / `VIDEO_TARGET_FPS` / `VIDEO_TARGET_RESOLUTION` / `VIDEO_DEFAULT_SCENE_SECONDS` / `VIDEO_MAX_BUDGET`；`TTS_PROVIDER` / `TTS_API_BASE_URL` / `TTS_API_KEY` / `TTS_MODEL` / `TTS_TIMEOUT_S` / `TTS_MAX_RETRIES` / `TTS_DEFAULT_NARRATION_SPEED`。未配置云端地址时会写入 mock 产物，便于本地联调。
 
@@ -80,8 +84,8 @@ python -m uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 - **（可选）同人知识库**：左侧「同人知识库」创建知识集、上传 `.txt`/`.md`；在**尚未生成大纲**的项目上勾选「绑定当前项目」（或在点击「生成概要」创建新项目前勾好，会随 `POST /projects` 一并提交）；生成大纲后绑定不可改
 - 新建项目：输入创作意图 → 点击 `生成概要`
 - 项目管理：在「项目列表」中对任一项目右键，可执行 `重命名`（设置项目昵称，列表优先显示昵称）和 `删除项目`（硬删除项目全部私有资源）
-- 选概要并生成大纲：选择候选/填写自定义 → 点击 `生成大纲`（章数较多时会多轮调用模型，耗时更长但输出更稳；长耗时接口可带查询参数 **`stream=1` 或 `stream=true`**，返回 NDJSON 进度流，可见分阶段进度）
-- 逐章创作：点击 `续写下一章`（可选勾选 **「开启图片生成」**；如需修改再对“最新章”做反馈重写）
+- 选概要并生成大纲：选择候选/填写自定义 → 点击 `生成大纲`（默认先生成前 `OUTLINE_INITIAL_CHAPTERS` 章；长耗时接口可带查询参数 **`stream=1` 或 `stream=true`**，返回 NDJSON 进度流）
+- 逐章创作：点击 `续写下一章`（可选勾选 **「开启图片生成」**；当写到大纲边界会自动补齐后续 `OUTLINE_WINDOW_SIZE` 章，并用最近摘要/大纲要点/人物关系保证连贯）
 - 事件日志：在项目详情点击 `查看事件日志`，弹窗查看该项目的重要事件（如生成概要/大纲、续写、反馈重写）
 
 如果你想用 Live Server 直接打开 `frontend/index.html`（仅开发调试更方便），注意 `index.html` 里只有在端口为 `5500` 时才会把 API 指向后端 `http://127.0.0.1:8000`，因此推荐用 `5500` 端口运行 Live Server。

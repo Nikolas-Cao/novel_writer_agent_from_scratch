@@ -13,7 +13,10 @@ from graph.nodes import (
     generate_plot_ideas_node,
     identify_illustration_points_node,
     insert_illustrations_into_chapter_node,
-    plan_outline_node,
+    outline_extend_window_node,
+    outline_finalize_node,
+    outline_short_node,
+    outline_skeleton_lite_node,
     post_chapter_node,
     refine_chapter_node,
     rewrite_with_feedback_node,
@@ -24,6 +27,13 @@ from memory import try_create_sqlite_checkpointer
 from rag import LocalRagIndexer, LocalRagRetriever
 from state import NovelProjectState
 from storage import ChapterStore, CharacterGraphStore
+
+
+def _route_outline_mode(state: NovelProjectState) -> str:
+    total = int(state.get("total_chapters", 0) or 0) or 12
+    from graph.nodes.plan_outline import PLAN_OUTLINE_SINGLE_CALL_MAX
+
+    return "outline_short" if total <= PLAN_OUTLINE_SINGLE_CALL_MAX else "outline_skeleton_lite"
 
 
 def build_stage2_workflow(
@@ -43,8 +53,17 @@ def build_stage2_workflow(
     def n_generate_plot_ideas(state: NovelProjectState):
         return asyncio.run(generate_plot_ideas_node(state, llm=planner_llm))
 
-    def n_plan_outline(state: NovelProjectState):
-        return asyncio.run(plan_outline_node(state, llm=planner_llm))
+    def n_outline_short(state: NovelProjectState):
+        return asyncio.run(outline_short_node(state, llm=planner_llm))
+
+    def n_outline_skeleton_lite(state: NovelProjectState):
+        return asyncio.run(outline_skeleton_lite_node(state, llm=planner_llm))
+
+    def n_outline_extend_window(state: NovelProjectState):
+        return asyncio.run(outline_extend_window_node(state, llm=planner_llm))
+
+    def n_outline_finalize(state: NovelProjectState):
+        return asyncio.run(outline_finalize_node(state, llm=planner_llm))
 
     def n_write_chapter(state: NovelProjectState):
         return asyncio.run(write_chapter_node(state, llm=writer_llm, chapter_store=store))
@@ -53,13 +72,26 @@ def build_stage2_workflow(
         return asyncio.run(refine_chapter_node(state, llm=writer_llm, chapter_store=store))
 
     graph.add_node("generate_plot_ideas", n_generate_plot_ideas)
-    graph.add_node("plan_outline", n_plan_outline)
+    graph.add_node("outline_short", n_outline_short)
+    graph.add_node("outline_skeleton_lite", n_outline_skeleton_lite)
+    graph.add_node("outline_extend_window", n_outline_extend_window)
+    graph.add_node("outline_finalize", n_outline_finalize)
     graph.add_node("write_chapter", n_write_chapter)
     graph.add_node("refine_chapter", n_refine_chapter)
 
     graph.set_entry_point("generate_plot_ideas")
-    graph.add_edge("generate_plot_ideas", "plan_outline")
-    graph.add_edge("plan_outline", "write_chapter")
+    graph.add_conditional_edges(
+        "generate_plot_ideas",
+        _route_outline_mode,
+        {
+            "outline_short": "outline_short",
+            "outline_skeleton_lite": "outline_skeleton_lite",
+        },
+    )
+    graph.add_edge("outline_short", "outline_finalize")
+    graph.add_edge("outline_skeleton_lite", "outline_extend_window")
+    graph.add_edge("outline_extend_window", "outline_finalize")
+    graph.add_edge("outline_finalize", "write_chapter")
     graph.add_edge("write_chapter", "refine_chapter")
     graph.add_edge("refine_chapter", END)
 
@@ -99,10 +131,17 @@ def build_stage7_workflow(
     def n_generate_plot_ideas(state: NovelProjectState):
         return asyncio.run(generate_plot_ideas_node(state, llm=planner_llm))
 
-    def n_plan_outline(state: NovelProjectState):
-        return asyncio.run(
-            plan_outline_node(state, llm=planner_llm, rag_indexer=indexer)
-        )
+    def n_outline_short(state: NovelProjectState):
+        return asyncio.run(outline_short_node(state, llm=planner_llm))
+
+    def n_outline_skeleton_lite(state: NovelProjectState):
+        return asyncio.run(outline_skeleton_lite_node(state, llm=planner_llm))
+
+    def n_outline_extend_window(state: NovelProjectState):
+        return asyncio.run(outline_extend_window_node(state, llm=planner_llm))
+
+    def n_outline_finalize(state: NovelProjectState):
+        return asyncio.run(outline_finalize_node(state, llm=planner_llm, rag_indexer=indexer))
 
     def n_write_chapter(state: NovelProjectState):
         return asyncio.run(
@@ -182,7 +221,10 @@ def build_stage7_workflow(
         )
 
     graph.add_node("generate_plot_ideas", n_generate_plot_ideas)
-    graph.add_node("plan_outline", n_plan_outline)
+    graph.add_node("outline_short", n_outline_short)
+    graph.add_node("outline_skeleton_lite", n_outline_skeleton_lite)
+    graph.add_node("outline_extend_window", n_outline_extend_window)
+    graph.add_node("outline_finalize", n_outline_finalize)
     graph.add_node("write_chapter", n_write_chapter)
     graph.add_node("refine_chapter", n_refine_chapter)
     graph.add_node("refine_after_rewrite", n_refine_after_rewrite)
@@ -194,8 +236,18 @@ def build_stage7_workflow(
     graph.add_node("post_chapter_update", n_post_chapter)
 
     graph.set_entry_point("generate_plot_ideas")
-    graph.add_edge("generate_plot_ideas", "plan_outline")
-    graph.add_edge("plan_outline", "write_chapter")
+    graph.add_conditional_edges(
+        "generate_plot_ideas",
+        _route_outline_mode,
+        {
+            "outline_short": "outline_short",
+            "outline_skeleton_lite": "outline_skeleton_lite",
+        },
+    )
+    graph.add_edge("outline_short", "outline_finalize")
+    graph.add_edge("outline_skeleton_lite", "outline_extend_window")
+    graph.add_edge("outline_extend_window", "outline_finalize")
+    graph.add_edge("outline_finalize", "write_chapter")
     graph.add_edge("write_chapter", "refine_chapter")
 
     graph.add_conditional_edges(
@@ -253,10 +305,17 @@ def build_stage3_workflow(
     def n_generate_plot_ideas(state: NovelProjectState):
         return asyncio.run(generate_plot_ideas_node(state, llm=planner_llm))
 
-    def n_plan_outline(state: NovelProjectState):
-        return asyncio.run(
-            plan_outline_node(state, llm=planner_llm, rag_indexer=indexer)
-        )
+    def n_outline_short(state: NovelProjectState):
+        return asyncio.run(outline_short_node(state, llm=planner_llm))
+
+    def n_outline_skeleton_lite(state: NovelProjectState):
+        return asyncio.run(outline_skeleton_lite_node(state, llm=planner_llm))
+
+    def n_outline_extend_window(state: NovelProjectState):
+        return asyncio.run(outline_extend_window_node(state, llm=planner_llm))
+
+    def n_outline_finalize(state: NovelProjectState):
+        return asyncio.run(outline_finalize_node(state, llm=planner_llm, rag_indexer=indexer))
 
     def n_write_chapter(state: NovelProjectState):
         return asyncio.run(
@@ -306,7 +365,10 @@ def build_stage3_workflow(
         )
 
     graph.add_node("generate_plot_ideas", n_generate_plot_ideas)
-    graph.add_node("plan_outline", n_plan_outline)
+    graph.add_node("outline_short", n_outline_short)
+    graph.add_node("outline_skeleton_lite", n_outline_skeleton_lite)
+    graph.add_node("outline_extend_window", n_outline_extend_window)
+    graph.add_node("outline_finalize", n_outline_finalize)
     graph.add_node("write_chapter", n_write_chapter)
     graph.add_node("refine_chapter", n_refine_chapter)
     graph.add_node("identify_illustration_points", n_identify_illustration_points)
@@ -315,8 +377,18 @@ def build_stage3_workflow(
     graph.add_node("post_chapter_update", n_post_chapter)
 
     graph.set_entry_point("generate_plot_ideas")
-    graph.add_edge("generate_plot_ideas", "plan_outline")
-    graph.add_edge("plan_outline", "write_chapter")
+    graph.add_conditional_edges(
+        "generate_plot_ideas",
+        _route_outline_mode,
+        {
+            "outline_short": "outline_short",
+            "outline_skeleton_lite": "outline_skeleton_lite",
+        },
+    )
+    graph.add_edge("outline_short", "outline_finalize")
+    graph.add_edge("outline_skeleton_lite", "outline_extend_window")
+    graph.add_edge("outline_extend_window", "outline_finalize")
+    graph.add_edge("outline_finalize", "write_chapter")
     graph.add_edge("write_chapter", "refine_chapter")
     graph.add_conditional_edges(
         "refine_chapter",
@@ -357,10 +429,17 @@ def build_stage4_workflow(
     def n_generate_plot_ideas(state: NovelProjectState):
         return asyncio.run(generate_plot_ideas_node(state, llm=planner_llm))
 
-    def n_plan_outline(state: NovelProjectState):
-        return asyncio.run(
-            plan_outline_node(state, llm=planner_llm, rag_indexer=indexer)
-        )
+    def n_outline_short(state: NovelProjectState):
+        return asyncio.run(outline_short_node(state, llm=planner_llm))
+
+    def n_outline_skeleton_lite(state: NovelProjectState):
+        return asyncio.run(outline_skeleton_lite_node(state, llm=planner_llm))
+
+    def n_outline_extend_window(state: NovelProjectState):
+        return asyncio.run(outline_extend_window_node(state, llm=planner_llm))
+
+    def n_outline_finalize(state: NovelProjectState):
+        return asyncio.run(outline_finalize_node(state, llm=planner_llm, rag_indexer=indexer))
 
     def n_write_chapter(state: NovelProjectState):
         return asyncio.run(
@@ -440,7 +519,10 @@ def build_stage4_workflow(
         )
 
     graph.add_node("generate_plot_ideas", n_generate_plot_ideas)
-    graph.add_node("plan_outline", n_plan_outline)
+    graph.add_node("outline_short", n_outline_short)
+    graph.add_node("outline_skeleton_lite", n_outline_skeleton_lite)
+    graph.add_node("outline_extend_window", n_outline_extend_window)
+    graph.add_node("outline_finalize", n_outline_finalize)
     graph.add_node("write_chapter", n_write_chapter)
     graph.add_node("refine_chapter", n_refine_chapter)
     graph.add_node("refine_after_rewrite", n_refine_after_rewrite)
@@ -452,8 +534,18 @@ def build_stage4_workflow(
     graph.add_node("post_chapter_update", n_post_chapter)
 
     graph.set_entry_point("generate_plot_ideas")
-    graph.add_edge("generate_plot_ideas", "plan_outline")
-    graph.add_edge("plan_outline", "write_chapter")
+    graph.add_conditional_edges(
+        "generate_plot_ideas",
+        _route_outline_mode,
+        {
+            "outline_short": "outline_short",
+            "outline_skeleton_lite": "outline_skeleton_lite",
+        },
+    )
+    graph.add_edge("outline_short", "outline_finalize")
+    graph.add_edge("outline_skeleton_lite", "outline_extend_window")
+    graph.add_edge("outline_extend_window", "outline_finalize")
+    graph.add_edge("outline_finalize", "write_chapter")
     graph.add_edge("write_chapter", "refine_chapter")
     graph.add_conditional_edges(
         "refine_chapter",

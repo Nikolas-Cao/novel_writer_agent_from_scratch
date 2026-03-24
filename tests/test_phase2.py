@@ -33,6 +33,28 @@ class FakePlannerLLM:
             return _Resp(
                 '{"plot_ideas":["候选剧情A：在边陲城市成长的少女卷入王权阴谋。","候选剧情B：失忆机械师在废土寻找记忆与真相。"]}'
             )
+        if "【plan_outline_extend_window】" in prompt:
+            m = re.search(r"本次新增区间：(\d+)\.\.(\d+)", prompt)
+            s = int(m.group(1)) if m else 0
+            e = int(m.group(2)) if m else s
+            chapters = []
+            for g in range(s, e + 1):
+                chapters.append(
+                    {
+                        "global_index": g,
+                        "title": f"第{g + 1}章",
+                        "beat": f"beat{g}",
+                        "points": [f"p1-{g}", f"p2-{g}", f"p3-{g}"],
+                        "depends_on": [g - 1] if g > 0 else [],
+                        "carry_forward": [f"cf-{g}"],
+                        "new_threads": [f"new-{g}"],
+                        "resolved_threads": [],
+                    }
+                )
+            repairs = []
+            if s > 0:
+                repairs.append({"global_index": s - 1, "points": [f"repair-{s - 1}"]})
+            return _Resp(json.dumps({"chapters": chapters, "repairs": repairs}, ensure_ascii=False))
         if "【plan_outline_expand_batch】" in prompt:
             m = re.search(r"本批 global_index 列表：([\d,]+)", prompt)
             raw = (m.group(1) if m else "").strip()
@@ -47,9 +69,13 @@ class FakePlannerLLM:
                 json.dumps({"volumes": [{"volume_title": "第一卷", "chapters": chs}]}, ensure_ascii=False)
             )
         if "【plan_outline_single】" in prompt:
-            return _Resp(
-                '{"volumes":[{"volume_title":"第一卷 迷雾初启","chapters":[{"title":"第一章 雨夜来信","points":["主角收到神秘来信","踏入旧城区调查","发现组织追踪线索"]}]}]}'
-            )
+            m = re.search(r"目标章节数[：:]\s*(\d+)", prompt)
+            n = int(m.group(1)) if m else 1
+            chs = [
+                {"title": f"第{i + 1}章 雨夜来信", "points": [f"主线推进{i}", f"冲突升级{i}", f"悬念埋设{i}"]}
+                for i in range(n)
+            ]
+            return _Resp(json.dumps({"volumes": [{"volume_title": "第一卷 迷雾初启", "chapters": chs}]}, ensure_ascii=False))
         return _Resp("{}")
 
 
@@ -100,15 +126,76 @@ def test_plan_outline_multi_phase_batches_and_rag():
     idx = _Idx()
     out = asyncio.run(plan_outline_node(state, llm=FakePlannerLLM(), rag_indexer=idx))
     structure = out["outline_structure"]
-    total = 0
-    for vol in structure["volumes"]:
-        total += len(vol.get("chapters") or [])
+    total = sum(len(vol.get("chapters") or []) for vol in structure["volumes"])
     assert total == n
+    generated_until = int(out.get("outline_generated_until", -1))
+    assert generated_until >= 9
+    refs = []
     for vol in structure["volumes"]:
-        for ch in vol.get("chapters") or []:
-            assert isinstance(ch.get("points"), list) and len(ch["points"]) >= 1
+        refs.extend(vol.get("chapters") or [])
+    for i in range(generated_until + 1):
+        assert isinstance(refs[i].get("points"), list) and len(refs[i]["points"]) >= 1
     assert idx.outline_chunks == n
     assert outline_structure_to_string(structure)
+
+
+def test_plan_outline_extend_with_repair_and_continuity_fields():
+    from graph.nodes.plan_outline import plan_outline_extend_node, plan_outline_node
+
+    state = {"selected_plot_summary": "窗口测试", "total_chapters": 8, "project_id": "p-extend"}
+    base = asyncio.run(plan_outline_node(state, llm=FakePlannerLLM(), target_chapters=4))
+    merged_state = {**state, **base}
+    out = asyncio.run(
+        plan_outline_extend_node(
+            merged_state,
+            start_chapter=4,
+            extend_count=3,
+            llm=FakePlannerLLM(),
+            recent_fact_pack={
+                "recent_summaries": "x",
+                "recent_outline_points": "y",
+                "character_snapshot": "z",
+                "story_constraints": "k",
+            },
+        )
+    )
+    structure = out["outline_structure"]
+    total = sum(len(v.get("chapters") or []) for v in structure["volumes"])
+    assert total >= 7
+    refs = []
+    for vol in structure["volumes"]:
+        for ch in vol.get("chapters") or []:
+            refs.append(ch)
+    assert refs[3]["points"][0].startswith("repair-")
+    assert refs[4].get("depends_on") == [3]
+    assert refs[4].get("carry_forward")
+    assert int(out.get("outline_generated_until", -1)) >= 6
+
+
+def test_plan_outline_extend_skip_repair_for_written_chapters():
+    from graph.nodes.plan_outline import plan_outline_extend_node, plan_outline_node
+
+    state = {"selected_plot_summary": "窗口测试", "total_chapters": 12, "project_id": "p-no-repair"}
+    base = asyncio.run(plan_outline_node(state, llm=FakePlannerLLM(), target_chapters=6))
+    merged_state = {
+        **state,
+        **base,
+        "last_written_chapter_index": 5,
+    }
+    out = asyncio.run(
+        plan_outline_extend_node(
+            merged_state,
+            start_chapter=6,
+            extend_count=3,
+            llm=FakePlannerLLM(),
+            recent_fact_pack={"recent_summaries": "x"},
+        )
+    )
+    refs = []
+    for vol in out["outline_structure"]["volumes"]:
+        refs.extend(vol.get("chapters") or [])
+    # g=5 已写正文，repair 应被禁用，不应出现 repair-5
+    assert not str((refs[5].get("points") or [""])[0]).startswith("repair-")
 
 
 def test_write_and_refine_chapter():
@@ -186,6 +273,8 @@ def run_all():
     test_generate_plot_ideas()
     test_plan_outline()
     test_plan_outline_multi_phase_batches_and_rag()
+    test_plan_outline_extend_with_repair_and_continuity_fields()
+    test_plan_outline_extend_skip_repair_for_written_chapters()
     test_write_and_refine_chapter()
     test_workflow_runs_and_checkpoint_available()
     print("Phase 2 acceptance: all passed.")

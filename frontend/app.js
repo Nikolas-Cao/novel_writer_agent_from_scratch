@@ -476,8 +476,12 @@ const state = {
   selectedChapterIndex: null,
   chapterMetas: [],
   currentChapterCharacterGraph: null,
+  outlineGeneratedUntil: -1,
+  outlineWindowSize: 10,
+  totalChapters: 0,
   isGeneratingOutline: false,
   isChapterWriteInProgress: false,
+  isOutlineWindowGenerating: false,
   /** 用于防止 openChapter 的请求乱序覆盖 UI */
   openChapterRequestSeq: 0,
   knowledgeBases: [],
@@ -508,6 +512,8 @@ const el = {
   selectedIdeaView: document.getElementById("selected-idea-view"),
   projectMeta: document.getElementById("project-meta"),
   tokenUsage: document.getElementById("token-usage"),
+  outlineWindowRangeLabel: document.getElementById("outline-window-range-label"),
+  btnGenerateOutlineRange: document.getElementById("btn-generate-outline-range"),
   outlineView: document.getElementById("outline-view"),
   chapterList: document.getElementById("chapter-list"),
   chapterView: document.getElementById("chapter-view"),
@@ -653,7 +659,7 @@ function updateChapterActionButtons() {
   const canModify = hasSelection && latestSelected;
   // 仅在选中「最新章节」时显示：续写下一章、重新生成本章、提交反馈重写
   const showWriteActions = !hasSelection || latestSelected;
-  const writeDisabled = state.isChapterWriteInProgress;
+  const writeDisabled = state.isChapterWriteInProgress || state.isOutlineWindowGenerating;
 
   if (el.btnNextChapter) {
     el.btnNextChapter.hidden = !showWriteActions;
@@ -689,6 +695,74 @@ function updateChapterActionButtons() {
     el.btnViewAiVideo.hidden = !hasSelection || !hasVideo;
     el.btnViewAiVideo.disabled = !hasSelection || !hasVideo;
     el.btnViewAiVideo.title = hasVideo ? "" : "当前章节暂无已生成视频";
+  }
+}
+
+function computeNextOutlineWindowRange() {
+  const generatedUntil = Number.isFinite(Number(state.outlineGeneratedUntil))
+    ? Number(state.outlineGeneratedUntil)
+    : -1;
+  const total = Number.isFinite(Number(state.totalChapters)) ? Number(state.totalChapters) : 0;
+  const windowSize =
+    Number.isFinite(Number(state.outlineWindowSize)) && Number(state.outlineWindowSize) > 0
+      ? Number(state.outlineWindowSize)
+      : 10;
+  const startIdx = generatedUntil + 1;
+  if (total <= 0 || startIdx >= total) return null;
+  const endIdx = Math.min(total - 1, startIdx + windowSize - 1);
+  return {
+    startIndex: startIdx,
+    endIndex: endIdx,
+    i: startIdx + 1,
+    j: endIdx + 1,
+  };
+}
+
+function updateOutlineWindowRangeHint() {
+  if (!el.outlineWindowRangeLabel) return;
+  const r = computeNextOutlineWindowRange();
+  if (!r) {
+    el.outlineWindowRangeLabel.textContent = "全部大纲已生成";
+    if (el.btnGenerateOutlineRange) el.btnGenerateOutlineRange.hidden = true;
+    return;
+  }
+  if (el.btnGenerateOutlineRange) el.btnGenerateOutlineRange.hidden = false;
+  el.outlineWindowRangeLabel.textContent = `下一窗口：第 ${r.i}~${r.j} 章`;
+}
+
+async function generateOutlineRange() {
+  if (!state.currentProjectId) {
+    setStatus("请先创建或打开项目");
+    return;
+  }
+  const r = computeNextOutlineWindowRange();
+  if (!r) {
+    setStatus("大纲已覆盖全部章节，无需补窗");
+    return;
+  }
+  const { i, j } = r;
+  setStatus(`正在生成第 ${i}~${j} 章大纲...`);
+  state.isOutlineWindowGenerating = true;
+  updateChapterActionButtons();
+  setGlobalInteractionLocked(true);
+  if (el.btnGenerateOutlineRange) el.btnGenerateOutlineRange.disabled = true;
+  try {
+    const data = await postNdjsonStream(
+      `/projects/${state.currentProjectId}/outline/window`,
+      {},
+      applyProgressToStatus
+    );
+    renderOutline(data.outline_structure || { volumes: [] });
+    await openProject(state.currentProjectId);
+    setStatus(`已生成第 ${i}~${j} 章大纲`);
+  } catch (e) {
+    setStatus(`生成区间大纲失败：${e.message}`);
+  } finally {
+    state.isOutlineWindowGenerating = false;
+    updateChapterActionButtons();
+    setGlobalInteractionLocked(false);
+    if (el.btnGenerateOutlineRange) el.btnGenerateOutlineRange.disabled = false;
+    updateOutlineWindowRangeHint();
   }
 }
 
@@ -1001,10 +1075,9 @@ function renderProjectList(projectIds) {
 
     const btn = document.createElement("button");
     btn.className = "project-open-btn";
-    const ts = state.projectCreatedAt[projectId];
-    const timeLabel = formatCreatedAt(ts);
+    btn.dataset.projectId = projectId;
     const displayName = getProjectDisplayName(projectId);
-    btn.textContent = timeLabel ? `打开 ${displayName}（${timeLabel}）` : `打开 ${displayName}`;
+    btn.textContent = displayName;
     btn.onclick = () => openProject(projectId);
     head.appendChild(btn);
 
@@ -1172,6 +1245,16 @@ async function openProject(projectId) {
     renderProjectList(state.projectIds);
     state.currentProjectKbBindLocked = projectHasOutlineForKbLock(p);
     state.currentProjectKbIds = Array.isArray(p.selected_kb_ids) ? p.selected_kb_ids.map(String) : [];
+    state.outlineGeneratedUntil = Number.isFinite(Number(p.outline_generated_until))
+      ? Number(p.outline_generated_until)
+      : -1;
+    state.outlineWindowSize = Number.isFinite(Number(p.outline_window_size))
+      ? Number(p.outline_window_size)
+      : 10;
+    state.totalChapters = Number.isFinite(Number(p.total_chapters))
+      ? Number(p.total_chapters)
+      : 0;
+    updateOutlineWindowRangeHint();
     await loadKnowledgeBases();
     const kbPart =
       state.currentProjectKbBindLocked && state.currentProjectKbIds.length
@@ -1199,6 +1282,10 @@ async function openProject(projectId) {
     state.currentChapterIndex = null;
     state.currentProjectKbBindLocked = false;
     state.currentProjectKbIds = [];
+    state.outlineGeneratedUntil = -1;
+    state.outlineWindowSize = 10;
+    state.totalChapters = 0;
+    updateOutlineWindowRangeHint();
     state.chapterVideoOutputs = {};
     state.selectedChapterVideoOutput = null;
     if (el.tokenUsage) el.tokenUsage.innerHTML = "";
@@ -1994,6 +2081,7 @@ function bindEvents() {
   bindClick(el.btnNewProject, startNewProject);
   bindClick(el.btnGenerateIdeas, generateIdeas);
   bindClick(el.btnGenerateOutline, generateOutline);
+  bindClick(el.btnGenerateOutlineRange, generateOutlineRange);
   bindClick(el.btnNextChapter, writeNextChapter);
   bindClick(el.btnRollbackTail, rollbackTailFromSelectedChapter);
   bindClick(el.btnRegenerateChapter, regenerateCurrentChapter);

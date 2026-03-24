@@ -1,13 +1,19 @@
 """
 LLM 工厂：统一创建 planner / writer 模型实例；TokenTrackingLLM 用于累计 token 用量。
 """
+import contextlib
+import datetime as dt
+import inspect
 import logging
 import os
-from typing import Any, AsyncIterator, Dict, MutableMapping, Tuple
+import time
+import uuid
+from typing import Any, AsyncIterator, Dict, MutableMapping, Optional, Tuple
 
 from langchain_openai import ChatOpenAI
 
 from config import (
+    DEBUG,
     PLANNER_API_KEY,
     PLANNER_BASE_URL,
     PLANNER_MODEL,
@@ -15,6 +21,8 @@ from config import (
     WRITER_BASE_URL,
     WRITER_MODEL,
 )
+from storage import LLMInvokeStore
+from storage.llm_invoke_store import resolve_purpose
 
 logger = logging.getLogger(__name__)
 
@@ -62,9 +70,20 @@ class TokenTrackingLLM:
     其它属性透传给内层，便于 node 里照常使用。
     """
 
-    def __init__(self, inner: ChatOpenAI, usage_by_model: Dict[str, Dict[str, int]]):
+    def __init__(
+        self,
+        inner: ChatOpenAI,
+        usage_by_model: Dict[str, Dict[str, int]],
+        *,
+        debug_enabled: bool = DEBUG,
+        invoke_store: Optional[LLMInvokeStore] = None,
+        debug_context: Optional[Dict[str, Any]] = None,
+    ):
         self._inner = inner
         self._usage_by_model = usage_by_model
+        self._debug_enabled = bool(debug_enabled)
+        self._invoke_store = invoke_store or LLMInvokeStore()
+        self._debug_context: Dict[str, Any] = dict(debug_context or {})
         self._model_name = (
             getattr(inner, "model_name", None)
             or getattr(inner, "model", None)
@@ -85,15 +104,157 @@ class TokenTrackingLLM:
         bucket["input_tokens"] = int(bucket.get("input_tokens", 0)) + inp
         bucket["output_tokens"] = int(bucket.get("output_tokens", 0)) + out
 
+    def set_debug_context(self, **kwargs: Any) -> None:
+        for key, value in kwargs.items():
+            if value is not None:
+                self._debug_context[str(key)] = value
+
+    def _infer_node_name(self) -> str:
+        # 思路：
+        # 1) 若调用方已显式透传 node_name，直接使用；
+        # 2) 否则从调用栈向上查找首个 *_node 函数名；
+        # 3) 若仍找不到，回退为 unknown_node。
+        explicit = str(self._debug_context.get("node_name") or "").strip()
+        if explicit:
+            return explicit
+        for frame in inspect.stack()[2:]:
+            fname = str(frame.function or "").strip()
+            if fname.endswith("_node"):
+                return fname
+        return "unknown_node"
+
+    def _serialize_prompt(self, args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
+        if args:
+            return args[0]
+        if "input" in kwargs:
+            return kwargs.get("input")
+        return {"args": list(args), "kwargs": kwargs}
+
+    def _response_text(self, resp: Any) -> str:
+        if isinstance(resp, str):
+            return resp
+        content = getattr(resp, "content", None)
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    txt = item.get("text")
+                    if txt:
+                        parts.append(str(txt))
+                else:
+                    parts.append(str(item))
+            if parts:
+                return "".join(parts)
+        return str(resp)
+
+    def _finalize_debug_record(
+        self,
+        *,
+        invoke_id: str,
+        started_at: dt.datetime,
+        prompt: Any,
+        response_text: str,
+        is_stream: bool,
+        status: str,
+        error: Optional[Exception] = None,
+        usage: Optional[Dict[str, int]] = None,
+    ) -> None:
+        if not self._debug_enabled:
+            return
+        project_id = str(self._debug_context.get("project_id") or "").strip()
+        if not project_id:
+            return
+        finished_at = dt.datetime.now(dt.timezone.utc)
+        node_name = self._infer_node_name()
+        pp = resolve_purpose(node_name)
+        record = {
+            "invoke_id": invoke_id,
+            "project_id": project_id,
+            "node_name": node_name,
+            "purpose": pp["purpose"],
+            "purpose_group": pp["purpose_group"],
+            "phase": str(self._debug_context.get("phase") or ""),
+            "model_name": str(self._model_name),
+            "is_stream": bool(is_stream),
+            "status": status,
+            "prompt": prompt,
+            "response_text": response_text,
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "duration_ms": int((finished_at - started_at).total_seconds() * 1000),
+            "usage": usage or {},
+            "error": (
+                None
+                if error is None
+                else {"type": error.__class__.__name__, "message": str(error)}
+            ),
+        }
+        try:
+            self._invoke_store.write_record(project_id, record)
+        except Exception:
+            logger.exception("failed to persist llm invoke record")
+
     def invoke(self, *args: Any, **kwargs: Any) -> Any:
-        resp = self._inner.invoke(*args, **kwargs)
-        self._accumulate(resp)
-        return resp
+        invoke_id = str(uuid.uuid4())
+        started_at = dt.datetime.now(dt.timezone.utc)
+        prompt = self._serialize_prompt(args, kwargs)
+        try:
+            resp = self._inner.invoke(*args, **kwargs)
+            self._accumulate(resp)
+            inp, out = _extract_token_usage_from_message(resp)
+            self._finalize_debug_record(
+                invoke_id=invoke_id,
+                started_at=started_at,
+                prompt=prompt,
+                response_text=self._response_text(resp),
+                is_stream=False,
+                status="success",
+                usage={"input_tokens": int(inp), "output_tokens": int(out)},
+            )
+            return resp
+        except Exception as exc:
+            self._finalize_debug_record(
+                invoke_id=invoke_id,
+                started_at=started_at,
+                prompt=prompt,
+                response_text="",
+                is_stream=False,
+                status="error",
+                error=exc,
+            )
+            raise
 
     async def ainvoke(self, *args: Any, **kwargs: Any) -> Any:
-        resp = await self._inner.ainvoke(*args, **kwargs)
-        self._accumulate(resp)
-        return resp
+        invoke_id = str(uuid.uuid4())
+        started_at = dt.datetime.now(dt.timezone.utc)
+        prompt = self._serialize_prompt(args, kwargs)
+        try:
+            resp = await self._inner.ainvoke(*args, **kwargs)
+            self._accumulate(resp)
+            inp, out = _extract_token_usage_from_message(resp)
+            self._finalize_debug_record(
+                invoke_id=invoke_id,
+                started_at=started_at,
+                prompt=prompt,
+                response_text=self._response_text(resp),
+                is_stream=False,
+                status="success",
+                usage={"input_tokens": int(inp), "output_tokens": int(out)},
+            )
+            return resp
+        except Exception as exc:
+            self._finalize_debug_record(
+                invoke_id=invoke_id,
+                started_at=started_at,
+                prompt=prompt,
+                response_text="",
+                is_stream=False,
+                status="error",
+                error=exc,
+            )
+            raise
 
     async def astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
         """
@@ -186,42 +347,69 @@ class TokenTrackingLLM:
                     return int(self.last)
                 return int(self.sum)
 
+        invoke_id = str(uuid.uuid4())
+        started_at = dt.datetime.now(dt.timezone.utc)
+        prompt = self._serialize_prompt(args, kwargs)
         inp_stats = _FieldUsageStats()
         out_stats = _FieldUsageStats()
         saw_usage = False
+        full_text_parts = []
 
         debug_usage = str(os.getenv("DEBUG_LLM_USAGE", "")).strip().lower() in {"1", "true", "yes", "y", "on"}
-        async for chunk in self._inner.astream(*args, **kwargs):
-            inp, out = _extract_token_usage_from_message(chunk)
-            if inp or out:
-                saw_usage = True
-                inp_stats.add(inp)
-                out_stats.add(out)
-            yield chunk
-
-        if saw_usage and (inp_stats.count or out_stats.count):
-            model = str(self._model_name)
-            resolved_inp = int(inp_stats.resolve_total())
-            resolved_out = int(out_stats.resolve_total())
-            bucket = self._usage_by_model.setdefault(
-                model, {"input_tokens": 0, "output_tokens": 0}
+        try:
+            async for chunk in self._inner.astream(*args, **kwargs):
+                inp, out = _extract_token_usage_from_message(chunk)
+                if inp or out:
+                    saw_usage = True
+                    inp_stats.add(inp)
+                    out_stats.add(out)
+                delta = self._response_text(chunk)
+                if delta:
+                    full_text_parts.append(delta)
+                yield chunk
+        except Exception as exc:
+            self._finalize_debug_record(
+                invoke_id=invoke_id,
+                started_at=started_at,
+                prompt=prompt,
+                response_text="".join(full_text_parts),
+                is_stream=True,
+                status="error",
+                error=exc,
             )
+            raise
+
+        model = str(self._model_name)
+        resolved_inp = int(inp_stats.resolve_total()) if saw_usage else 0
+        resolved_out = int(out_stats.resolve_total()) if saw_usage else 0
+        if saw_usage and (inp_stats.count or out_stats.count):
+            bucket = self._usage_by_model.setdefault(model, {"input_tokens": 0, "output_tokens": 0})
             bucket["input_tokens"] = int(bucket.get("input_tokens", 0)) + resolved_inp
             bucket["output_tokens"] = int(bucket.get("output_tokens", 0)) + resolved_out
 
-            if debug_usage:
-                logger.debug(
-                    "usage resolve model=%s input_count=%s output_count=%s input_sum=%s input_last=%s output_sum=%s output_last=%s resolved_inp=%s resolved_out=%s",
-                    model,
-                    inp_stats.count,
-                    out_stats.count,
-                    inp_stats.sum,
-                    inp_stats.last,
-                    out_stats.sum,
-                    out_stats.last,
-                    resolved_inp,
-                    resolved_out,
-                )
+        self._finalize_debug_record(
+            invoke_id=invoke_id,
+            started_at=started_at,
+            prompt=prompt,
+            response_text="".join(full_text_parts),
+            is_stream=True,
+            status="success",
+            usage={"input_tokens": resolved_inp, "output_tokens": resolved_out},
+        )
+
+        if debug_usage and saw_usage:
+            logger.debug(
+                "usage resolve model=%s input_count=%s output_count=%s input_sum=%s input_last=%s output_sum=%s output_last=%s resolved_inp=%s resolved_out=%s",
+                model,
+                inp_stats.count,
+                out_stats.count,
+                inp_stats.sum,
+                inp_stats.last,
+                out_stats.sum,
+                out_stats.last,
+                resolved_inp,
+                resolved_out,
+            )
 
 
 def create_planner_llm() -> ChatOpenAI:

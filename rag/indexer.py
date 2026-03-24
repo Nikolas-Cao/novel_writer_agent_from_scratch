@@ -103,6 +103,24 @@ class LocalRagIndexer:
                 global_idx += 1
         return upserted
 
+    def upsert_outline_chunks_range(
+        self,
+        project_id: str,
+        outline_structure: dict,
+        start_index: int,
+        end_index: int,
+    ) -> int:
+        """将 [start_index, end_index] 区间的大纲 chunk 回写到 RAG。"""
+        s = int(start_index)
+        e = int(end_index)
+        if e < s:
+            return 0
+        return self.upsert_outline_chunks_for_chapters(
+            project_id=project_id,
+            outline_structure=outline_structure,
+            chapter_indices=set(range(s, e + 1)),
+        )
+
     def delete_chapter_summaries_from(self, project_id: str, start_index: int) -> None:
         coll = self._collection(project_id)
         begin = int(start_index)

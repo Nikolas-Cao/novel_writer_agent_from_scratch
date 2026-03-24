@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import shutil
 import time
 import uuid
@@ -27,7 +28,9 @@ from graph.nodes.generate_plot_ideas import generate_plot_ideas_node
 from graph.nodes.fetch_or_generate_images import fetch_or_generate_images_node
 from graph.nodes.identify_illustration_points import identify_illustration_points_node
 from graph.nodes.insert_illustrations_into_chapter import insert_illustrations_into_chapter_node
-from graph.nodes.plan_outline import plan_outline_node
+from graph.nodes.outline_extend_window import outline_extend_window_node
+from graph.nodes.outline_finalize import outline_finalize_node
+from graph.nodes.plan_outline import plan_outline_extend_node, plan_outline_node
 from graph.nodes.post_chapter import post_chapter_node
 from graph.nodes.refine_chapter import refine_chapter_node
 from graph.nodes.rewrite_feedback import rewrite_with_feedback_node
@@ -50,6 +53,10 @@ logger = logging.getLogger(__name__)
 
 NDJSON_MEDIA = "application/x-ndjson"
 ProgressFn = Callable[[str, str], Awaitable[None]]
+
+OUTLINE_INITIAL_CHAPTERS = max(1, int(os.environ.get("OUTLINE_INITIAL_CHAPTERS", "20")))
+OUTLINE_WINDOW_SIZE = max(1, int(os.environ.get("OUTLINE_WINDOW_SIZE", "10")))
+OUTLINE_TRIGGER_MARGIN = max(0, int(os.environ.get("OUTLINE_TRIGGER_MARGIN", "0")))
 
 
 async def _noop_progress(_stage: str, _msg: str = "") -> None:
@@ -132,6 +139,11 @@ class OutlineRequest(BaseModel):
     total_chapters: Optional[int] = None
 
 
+class OutlineWindowRequest(BaseModel):
+    start_chapter: Optional[int] = Field(None, ge=1)
+    end_chapter: Optional[int] = Field(None, ge=1)
+
+
 class NextChapterRequest(BaseModel):
     chapter_word_target: Optional[int] = None
     enable_chapter_illustrations: Optional[bool] = None
@@ -171,6 +183,9 @@ def _default_state(project_id: str) -> Dict[str, Any]:
         "user_feedback": "",
         "last_rewrite_draft": "",
         "total_chapters": DEFAULT_TOTAL_CHAPTERS,
+        "outline_generated_until": -1,
+        "outline_window_size": OUTLINE_WINDOW_SIZE,
+        "outline_initial_chapters": OUTLINE_INITIAL_CHAPTERS,
         "chapter_word_target": CHAPTER_WORD_TARGET,
         "chapter_output_format": "markdown",
         "enable_chapter_illustrations": False,
@@ -268,7 +283,7 @@ def create_app(
     def _video_cancel_key(project_id: str, job_id: str) -> str:
         return f"{project_id}:{job_id}"
 
-    def _truncate_event_text(text: Any, max_len: int = 100) -> str:
+    def _truncate_event_text(text: Any, max_len: int = 300) -> str:
         raw = str(text or "").strip()
         if not raw:
             return ""
@@ -297,6 +312,65 @@ def create_app(
                 "status": status,
             },
         )
+
+    def bootstrap_project_events_if_empty(project_id: str) -> None:
+        path = event_store.path_for(project_id)
+        if path.exists() and path.stat().st_size > 0:
+            return
+        state = load_state(project_id)
+        base_ts = int(state.get("created_at") or time.time())
+
+        def _append_bootstrap_event(
+            *,
+            event_name: str,
+            event_content: str,
+            chapter_index: Optional[int] = None,
+            ts_offset: int = 0,
+        ) -> None:
+            event_store.append_event(
+                project_id,
+                {
+                    "event_id": f"evt-{uuid.uuid4().hex[:16]}",
+                    "ts": int(base_ts + ts_offset),
+                    "project_id": project_id,
+                    "chapter_index": int(chapter_index) if chapter_index is not None else None,
+                    "event_name": event_name,
+                    "event_content": _truncate_event_text(event_content),
+                    "status": "success",
+                    "bootstrapped": True,
+                },
+            )
+
+        instruction = _truncate_event_text(state.get("instruction", ""))
+        if instruction:
+            _append_bootstrap_event(
+                event_name="generate_plot_ideas",
+                event_content=f"根据{instruction}生成概要",
+                ts_offset=1,
+            )
+
+        summary = _truncate_event_text(state.get("selected_plot_summary", ""))
+        if summary:
+            _append_bootstrap_event(
+                event_name="generate_outline",
+                event_content=f"根据{summary}生成大纲",
+                ts_offset=2,
+            )
+
+        chapters = sorted(
+            [c for c in (state.get("chapters") or []) if isinstance(c, dict)],
+            key=lambda x: int(x.get("index", -1)),
+        )
+        for idx, chapter in enumerate(chapters, start=3):
+            chapter_index = int(chapter.get("index", -1))
+            if chapter_index < 0:
+                continue
+            _append_bootstrap_event(
+                event_name="write_next_chapter",
+                event_content=f"续写第{chapter_index + 1}章",
+                chapter_index=chapter_index,
+                ts_offset=idx,
+            )
 
     def _ensure_video_state(state: Dict[str, Any], project_id: str) -> None:
         if not state.get("character_bible"):
@@ -449,8 +523,17 @@ def create_app(
     def project_exists(project_id: str) -> bool:
         return (projects_dir / project_id).exists() or (states_dir / f"{project_id}.json").exists()
 
+    def _outline_last_index(outline_structure: Dict[str, Any]) -> int:
+        vols = (outline_structure or {}).get("volumes") or []
+        total = 0
+        for vol in vols:
+            if isinstance(vol, dict):
+                total += len(vol.get("chapters") or [])
+        return total - 1
+
     def load_state(project_id: str) -> Dict[str, Any]:
         data = checkpointer.load_state(project_id) or _default_state(project_id)
+        has_generated_until = "outline_generated_until" in data
         if "project_id" not in data:
             data["project_id"] = project_id
         if "token_usage" not in data:
@@ -459,6 +542,8 @@ def create_app(
         for k, v in defaults.items():
             if k not in data:
                 data[k] = v
+        if not has_generated_until:
+            data["outline_generated_until"] = _outline_last_index(data.get("outline_structure") or {"volumes": []})
         _ensure_video_state(data, project_id)
         return data
 
@@ -486,7 +571,11 @@ def create_app(
     def _tracked(state: Dict[str, Any]):
         """返回绑定到 state['token_usage'] 的 (planner, writer) 包装器。"""
         tu = state.setdefault("token_usage", {})
-        return TokenTrackingLLM(planner, tu), TokenTrackingLLM(writer, tu)
+        project_id = str(state.get("project_id") or "").strip()
+        return (
+            TokenTrackingLLM(planner, tu, debug_context={"project_id": project_id}),
+            TokenTrackingLLM(writer, tu, debug_context={"project_id": project_id}),
+        )
 
     EMPTY_PROJECT_GRACE_SECONDS = 10 * 60
 
@@ -575,6 +664,134 @@ def create_app(
             if int(item.get("index", -1)) == int(chapter_index):
                 return item
         return None
+
+    def outline_chapter_count(state: Dict[str, Any]) -> int:
+        vols = (state.get("outline_structure") or {}).get("volumes") or []
+        total = 0
+        for vol in vols:
+            if isinstance(vol, dict):
+                total += len(vol.get("chapters") or [])
+        return total
+
+    def outline_generated_until(state: Dict[str, Any]) -> int:
+        if "outline_generated_until" in state:
+            try:
+                return int(state.get("outline_generated_until", -1))
+            except (TypeError, ValueError):
+                pass
+        return outline_chapter_count(state) - 1
+
+    def _character_snapshot_text(project_id: str, chapter_index: int) -> str:
+        try:
+            snap = graph_store.load_for_chapter(project_id, chapter_index)
+        except FileNotFoundError:
+            snap = {"nodes": [], "edges": []}
+        nodes = list(snap.get("nodes", []))[:8]
+        edges = list(snap.get("edges", []))[:12]
+        if not nodes:
+            return "（暂无）"
+        id_to_name = {str(n.get("id")): str(n.get("name") or n.get("id")) for n in nodes if n.get("id")}
+        names = [id_to_name[k] for k in list(id_to_name.keys())[:8]]
+        rels: List[str] = []
+        for e in edges:
+            fr = id_to_name.get(str(e.get("from_id")), str(e.get("from_id") or ""))
+            to = id_to_name.get(str(e.get("to_id")), str(e.get("to_id") or ""))
+            rel = str(e.get("relation") or "")
+            if fr and to:
+                rels.append(f"{fr}->{to}({rel})")
+        return f"人物：{', '.join(names)}\n关系：{'; '.join(rels) if rels else '（暂无）'}"
+
+    def _recent_fact_pack(state: Dict[str, Any], start_idx: int) -> Dict[str, Any]:
+        pid = str(state.get("project_id") or "")
+        rag_ctx = rag_retriever.retrieve_for_chapter(
+            project_id=pid,
+            current_chapter_index=max(0, int(start_idx)),
+            k_chapters=5,
+            k_outline=0,
+        )
+        summaries = rag_ctx.get("summaries") or []
+        recent_summaries = "\n".join(
+            f"- 第{int(item.get('chapter_index', -1)) + 1}章：{item.get('text')}" for item in summaries
+        ) if summaries else "（无）"
+
+        vols = (state.get("outline_structure") or {}).get("volumes") or []
+        flat: List[Dict[str, Any]] = []
+        for vol in vols:
+            if not isinstance(vol, dict):
+                continue
+            for ch in vol.get("chapters") or []:
+                if isinstance(ch, dict):
+                    flat.append(ch)
+        begin = max(0, int(start_idx) - 5)
+        end = min(len(flat), int(start_idx))
+        rows: List[str] = []
+        for g in range(begin, end):
+            ch = flat[g]
+            pts = ch.get("points") if isinstance(ch.get("points"), list) else []
+            rows.append(f"- {g}: {ch.get('title') or f'第{g + 1}章'} | {'；'.join(str(p) for p in pts[:3]) if pts else '（无）'}")
+        recent_outline_points = "\n".join(rows) if rows else "（无）"
+
+        constraints = (
+            f"创作意图：{state.get('instruction') or '（无）'}\n"
+            f"剧情概要：{state.get('selected_plot_summary') or '（无）'}\n"
+            f"二创覆盖：{json.dumps(state.get('canon_overrides') or [], ensure_ascii=False)[:3000]}"
+        )
+        return {
+            "recent_summaries": recent_summaries,
+            "recent_outline_points": recent_outline_points,
+            "character_snapshot": _character_snapshot_text(pid, int(start_idx) - 1),
+            "story_constraints": constraints,
+        }
+
+    async def ensure_outline_window(
+        state: Dict[str, Any],
+        *,
+        emit: ProgressFn,
+        tp: Any,
+    ) -> None:
+        total = int(state.get("total_chapters") or 0)
+        if total <= 0:
+            return
+        current_idx = int(state.get("current_chapter_index") or 0)
+        generated_until = outline_generated_until(state)
+        need_extend = (current_idx + OUTLINE_TRIGGER_MARGIN) > generated_until
+        if not need_extend:
+            return
+        if generated_until >= total - 1:
+            return
+
+        start_idx = generated_until + 1
+        extend_count = int(state.get("outline_window_size") or OUTLINE_WINDOW_SIZE)
+        end_idx = min(total - 1, start_idx + max(1, extend_count) - 1)
+        await emit("plan_outline_extend", f"正在补齐后续大纲（第 {start_idx + 1}~{end_idx + 1} 章）…")
+        kb_context = ""
+        if state.get("kb_enabled") and state.get("selected_kb_ids"):
+            kb_context = await build_kb_context_for_outline(
+                kb_ids=list(state.get("selected_kb_ids") or []),
+                plot_summary=str(state.get("selected_plot_summary") or ""),
+                retriever=global_kb_retriever,
+            )
+        pack = _recent_fact_pack(state, start_idx)
+        out = await plan_outline_extend_node(
+            state,
+            start_chapter=start_idx,
+            extend_count=extend_count,
+            llm=tp,
+            on_progress=emit,
+            kb_context=kb_context or None,
+            recent_fact_pack=pack,
+        )
+        new_indices = set(int(i) for i in (out.get("outline_extended_indices") or []))
+        state.update(out)
+        if new_indices:
+            rag_indexer.upsert_outline_chunks_range(
+                project_id=str(state.get("project_id") or ""),
+                outline_structure=state.get("outline_structure") or {"volumes": []},
+                start_index=min(new_indices),
+                end_index=max(new_indices),
+            )
+        await emit("persist_outline_extend", "正在保存扩窗后的大纲…")
+        save_state(str(state.get("project_id") or ""), state)
 
     def latest_chapter_index(state: Dict[str, Any]) -> Optional[int]:
         chapters = state.get("chapters", [])
@@ -854,6 +1071,9 @@ def create_app(
             "chapters": state.get("chapters", []),
             "current_chapter_index": state.get("current_chapter_index", 0),
             "total_chapters": state.get("total_chapters"),
+            "outline_generated_until": outline_generated_until(state),
+            "outline_window_size": state.get("outline_window_size"),
+            "outline_initial_chapters": state.get("outline_initial_chapters"),
             "chapter_word_target": state.get("chapter_word_target"),
             "enable_chapter_illustrations": state.get("enable_chapter_illustrations", False),
             "created_at": _project_created_ts(project_id, state),
@@ -869,6 +1089,7 @@ def create_app(
     async def list_project_events(project_id: str, chapter_index: Optional[int] = None, limit: int = Query(200)):
         if not project_exists(project_id):
             raise HTTPException(status_code=404, detail="project not found")
+        bootstrap_project_events_if_empty(project_id)
         events = event_store.list_events(project_id, chapter_index=chapter_index, limit=int(limit))
         return {
             "project_id": project_id,
@@ -955,6 +1176,10 @@ def create_app(
         async def _run_outline(emit: ProgressFn) -> Dict[str, Any]:
             state = load_state(project_id)
             state["selected_plot_summary"] = req.selected_plot_summary
+            if "outline_initial_chapters" not in state:
+                state["outline_initial_chapters"] = OUTLINE_INITIAL_CHAPTERS
+            if "outline_window_size" not in state:
+                state["outline_window_size"] = OUTLINE_WINDOW_SIZE
             summary_brief = _truncate_event_text(req.selected_plot_summary)
             emit_project_event(
                 project_id,
@@ -966,7 +1191,9 @@ def create_app(
                 state["total_chapters"] = int(req.total_chapters)
             tp, tw = _tracked(state)
             logger.info("[生成大纲] start project=%s total_chapters=%s", project_id, state.get("total_chapters"))
-            await emit("plan_outline", "正在生成全书结构化大纲（LLM，可能需数分钟）…")
+            total = int(state.get("total_chapters") or DEFAULT_TOTAL_CHAPTERS)
+            initial_cnt = min(total, int(state.get("outline_initial_chapters") or OUTLINE_INITIAL_CHAPTERS))
+            await emit("plan_outline", f"正在生成初始大纲窗口（前 {initial_cnt} 章）…")
             kb_context = ""
             if state.get("kb_enabled") and state.get("selected_kb_ids"):
                 kb_context = await build_kb_context_for_outline(
@@ -981,6 +1208,7 @@ def create_app(
                     rag_indexer=rag_indexer,
                     on_progress=emit,
                     kb_context=kb_context or None,
+                    target_chapters=initial_cnt,
                 )
             except Exception as exc:
                 emit_project_event(
@@ -992,6 +1220,8 @@ def create_app(
                 raise_llm_http_error(exc, scene="生成大纲")
                 raise
             state.update(out)
+            if "outline_generated_until" not in out:
+                state["outline_generated_until"] = outline_generated_until(state)
             await emit("persist", "正在保存大纲并写入 RAG 索引…")
             save_state(project_id, state)
             emit_project_event(
@@ -1011,6 +1241,83 @@ def create_app(
         if stream:
             return StreamingResponse(ndjson_with_progress(_run_outline), media_type=NDJSON_MEDIA)
         return await _run_outline(_noop_progress)
+
+    @app.post("/projects/{project_id}/outline/window")
+    async def generate_outline_window(
+        project_id: str,
+        req: Optional[OutlineWindowRequest] = None,
+        stream: bool = Query(False),
+    ):
+        if not project_exists(project_id):
+            raise HTTPException(status_code=404, detail="project not found")
+
+        async def _run_outline_window(emit: ProgressFn) -> Dict[str, Any]:
+            state = load_state(project_id)
+            outline = state.get("outline_structure", {"volumes": []})
+            if not outline.get("volumes"):
+                raise HTTPException(status_code=400, detail="outline not generated")
+            total = int(state.get("total_chapters") or DEFAULT_TOTAL_CHAPTERS)
+            generated_until = outline_generated_until(state)
+            i = int(req.start_chapter) if req and req.start_chapter is not None else (generated_until + 2)
+            if req and req.end_chapter is not None:
+                j = int(req.end_chapter)
+            else:
+                window = int(state.get("outline_window_size") or OUTLINE_WINDOW_SIZE)
+                j = min(total, i + max(1, window) - 1)
+            if generated_until >= total - 1 or i > total:
+                return {
+                    "outline_structure": state.get("outline_structure", {"volumes": []}),
+                    "outline": state.get("outline", ""),
+                    "outline_generated_until": generated_until,
+                    "outline_extended_indices": [],
+                }
+            if i > j:
+                raise HTTPException(status_code=400, detail="start_chapter must be <= end_chapter")
+            if j > total:
+                raise HTTPException(status_code=400, detail=f"end_chapter exceeds total_chapters={total}")
+            start_idx = i - 1
+            extend_count = j - i + 1
+            state["last_written_chapter_index"] = int(latest_chapter_index(state) or -1)
+
+            tp, _tw = _tracked(state)
+            await emit("outline_window", f"正在生成第 {i}~{j} 章大纲…")
+            kb_context = ""
+            if state.get("kb_enabled") and state.get("selected_kb_ids"):
+                kb_context = await build_kb_context_for_outline(
+                    kb_ids=list(state.get("selected_kb_ids") or []),
+                    plot_summary=str(state.get("selected_plot_summary") or ""),
+                    retriever=global_kb_retriever,
+                )
+            pack = _recent_fact_pack(state, start_idx)
+            ext_out = await outline_extend_window_node(
+                state,
+                llm=tp,
+                on_progress=emit,
+                kb_context=kb_context or None,
+                recent_fact_pack=pack,
+                start_chapter=start_idx,
+                extend_count=extend_count,
+            )
+            state.update(ext_out)
+            fin_out = await outline_finalize_node(
+                state,
+                llm=tp,
+                rag_indexer=rag_indexer,
+                kb_context=kb_context or None,
+            )
+            state.update(fin_out)
+            await emit("persist", "正在保存更新后的大纲…")
+            save_state(project_id, state)
+            return {
+                "outline_structure": state.get("outline_structure", {"volumes": []}),
+                "outline": state.get("outline", ""),
+                "outline_generated_until": outline_generated_until(state),
+                "outline_extended_indices": state.get("outline_extended_indices") or [],
+            }
+
+        if stream:
+            return StreamingResponse(ndjson_with_progress(_run_outline_window), media_type=NDJSON_MEDIA)
+        return await _run_outline_window(_noop_progress)
 
     @app.get("/projects/{project_id}/chapters")
     async def list_chapters(project_id: str):
@@ -1062,6 +1369,9 @@ def create_app(
 
             chapters = state.get("chapters", [])
             next_idx = max([int(c.get("index", -1)) for c in chapters], default=-1) + 1
+            total_chapters = int(state.get("total_chapters") or DEFAULT_TOTAL_CHAPTERS)
+            if next_idx >= total_chapters:
+                raise HTTPException(status_code=400, detail=f"all chapters completed (total={total_chapters})")
             chapter_no = next_idx + 1
             state["current_chapter_index"] = next_idx
             if req.chapter_word_target is not None:
@@ -1073,7 +1383,11 @@ def create_app(
             tw_stream = None
             if stream:
                 tu = state.setdefault("token_usage", {})
-                tw_stream = TokenTrackingLLM(writer_streaming, tu)
+                tw_stream = TokenTrackingLLM(
+                    writer_streaming,
+                    tu,
+                    debug_context={"project_id": str(state.get("project_id") or "").strip()},
+                )
             logger.info("[续写下一章] start project=%s next_index=%s", project_id, next_idx)
             emit_project_event(
                 project_id,
@@ -1084,6 +1398,7 @@ def create_app(
             )
             await emit("chapter_pipeline", f"开始续写第 {next_idx + 1} 章…")
             try:
+                await ensure_outline_window(state, emit=emit, tp=tp)
                 await generate_chapter_for_current_index(
                     state,
                     scene="续写下一章",
@@ -1149,7 +1464,11 @@ def create_app(
             tw_stream = None
             if stream:
                 tu = state.setdefault("token_usage", {})
-                tw_stream = TokenTrackingLLM(writer_streaming, tu)
+                tw_stream = TokenTrackingLLM(
+                    writer_streaming,
+                    tu,
+                    debug_context={"project_id": str(state.get("project_id") or "").strip()},
+                )
             logger.info("[重新生成本章] start project=%s chapter_index=%s", project_id, index)
             await emit("chapter_pipeline", f"开始重新生成第 {int(index) + 1} 章…")
             await generate_chapter_for_current_index(
@@ -1262,7 +1581,11 @@ def create_app(
             tw_stream = None
             if stream:
                 tu = state.setdefault("token_usage", {})
-                tw_stream = TokenTrackingLLM(writer_streaming, tu)
+                tw_stream = TokenTrackingLLM(
+                    writer_streaming,
+                    tu,
+                    debug_context={"project_id": str(state.get("project_id") or "").strip()},
+                )
             logger.info(
                 "[反馈重写] start project=%s chapter_index=%s update_outline=%s",
                 project_id,

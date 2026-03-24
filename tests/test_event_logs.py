@@ -71,7 +71,7 @@ def test_event_logs_api_and_truncation():
 
     first = events[0]
     assert isinstance(first.get("event_content"), str)
-    assert len(first.get("event_content")) <= 100
+    assert len(first.get("event_content")) <= 300
 
 
 def test_event_logs_filter_by_chapter():

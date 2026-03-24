@@ -71,7 +71,9 @@ test.describe("LLM 长耗时：流式进度请求", () => {
     await page.goto("/");
     await expect(page.locator("#instruction-input")).toBeVisible();
 
-    await page.getByRole("button", { name: new RegExp(`打开 ${projectDetail.project_id}`) }).click();
+    await page
+      .locator(`.project-open-btn[data-project-id="${projectDetail.project_id}"]`)
+      .click();
     await expect(page.locator("#global-status")).toContainText(`已打开 ${projectDetail.project_id}`);
 
     await page.locator("#custom-summary-input").fill("自定义概要用于生成大纲");

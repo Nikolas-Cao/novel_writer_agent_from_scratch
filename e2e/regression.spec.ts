@@ -22,7 +22,7 @@ async function findProjectWithMinChapters(request: APIRequestContext, minChapter
 async function openProjectFromList(page: Page, projectId: string) {
   await page.goto("/");
   await expect(page.locator("#project-list")).toBeVisible();
-  await page.getByRole("button", { name: `打开 ${projectId}` }).click();
+  await page.locator(`.project-open-btn[data-project-id="${projectId}"]`).click();
   await expect(page.locator("#global-status")).toContainText(`已打开 ${projectId}`);
 }
 
@@ -290,7 +290,7 @@ test.describe("UI regressions from past chats", () => {
     });
 
     await page.goto("/");
-    await page.getByRole("button", { name: `打开 ${pid}` }).click();
+    await page.locator(`.project-open-btn[data-project-id="${pid}"]`).click();
     await expect(page.locator("#global-status")).toContainText(`已打开 ${pid}`);
     await page.getByRole("button", { name: /^第1章：/ }).click();
 
@@ -401,13 +401,19 @@ test.describe("UI regressions from past chats", () => {
     const ids = (projectsJson.projects || []).map((p) => p.project_id).filter(Boolean);
     test.skip(ids.length < 2, "至少需要 2 个项目才能测试切换");
     const [idA, idB] = ids.slice(0, 2);
+    const projectAResp = await request.get(`/projects/${idA}`);
+    const projectBResp = await request.get(`/projects/${idB}`);
+    const projectA = projectAResp.ok() ? ((await projectAResp.json()) as { nickname?: string | null }) : {};
+    const projectB = projectBResp.ok() ? ((await projectBResp.json()) as { nickname?: string | null }) : {};
+    const expectedNameA = String(projectA.nickname || "").trim() || idA;
+    const expectedNameB = String(projectB.nickname || "").trim() || idB;
 
     await openProjectFromList(page, idA);
-    await expect(page.locator("#project-meta")).toContainText(idA);
+    await expect(page.locator("#project-meta")).toContainText(expectedNameA);
 
-    await page.getByRole("button", { name: `打开 ${idB}` }).click();
+    await page.locator(`.project-open-btn[data-project-id="${idB}"]`).click();
     await expect(page.locator("#global-status")).toContainText(`已打开 ${idB}`);
-    await expect(page.locator("#project-meta")).toContainText(idB);
+    await expect(page.locator("#project-meta")).toContainText(expectedNameB);
   });
 
   test("切换项目时：反馈输入与同时更新大纲应重置", async ({ page, request }) => {
@@ -423,7 +429,7 @@ test.describe("UI regressions from past chats", () => {
     await updateOutline.check();
     await expect(updateOutline).toBeChecked();
 
-    await page.getByRole("button", { name: `打开 ${b.projectId}` }).click();
+    await page.locator(`.project-open-btn[data-project-id="${b.projectId}"]`).click();
     await expect(page.locator("#global-status")).toContainText(`已打开 ${b.projectId}`);
 
     await expect(page.locator("#feedback-input")).toHaveValue("");
@@ -486,7 +492,7 @@ test.describe("UI regressions from past chats", () => {
     await expect(selectedLi).toHaveAttribute("data-index", String(chaptersCount - 1));
   });
 
-  test("项目列表按创建时间升序，且按钮展示创建时间（stub GET /projects）", async ({ page }) => {
+  test("项目列表按创建时间升序，且按钮仅展示项目名（stub GET /projects）", async ({ page }) => {
     await page.route("**/projects", async (route) => {
       if (route.request().method() !== "GET") {
         await route.continue();
@@ -512,7 +518,7 @@ test.describe("UI regressions from past chats", () => {
     await expect(buttons.nth(0)).toContainText("p-old");
     await expect(buttons.nth(1)).toContainText("p-mid");
     await expect(buttons.nth(2)).toContainText("p-new");
-    await expect(buttons.nth(0)).toContainText(/\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}/);
+    await expect(buttons.nth(0)).toHaveText("p-old");
   });
 
   test("长概要：选中项 project-preview 的 title 含全文（stub，不依赖 LLM）", async ({ page }) => {
@@ -559,7 +565,7 @@ test.describe("UI regressions from past chats", () => {
     });
 
     await page.goto("/");
-    await page.getByRole("button", { name: /打开 p-long-preview/ }).click();
+    await page.locator(`.project-open-btn[data-project-id="p-long-preview"]`).click();
     await expect(page.locator("#global-status")).toContainText("已打开 p-long-preview");
 
     const preview = page.locator(".project-preview");
@@ -670,7 +676,7 @@ test.describe("UI regressions from past chats", () => {
 
     await page.goto("/");
     await expect(page.locator("#project-list")).toBeVisible();
-    await page.getByRole("button", { name: `打开 ${pid}` }).click();
+    await page.locator(`.project-open-btn[data-project-id="${pid}"]`).click();
     await expect(page.locator("#global-status")).toContainText(`已打开 ${pid}`);
 
     await page.locator("#btn-next-chapter").click();
@@ -814,14 +820,14 @@ test.describe("UI regressions from past chats", () => {
     });
 
     await page.goto("/");
-    await expect(page.getByRole("button", { name: /打开 p-delete-target/ })).toBeVisible();
+    await expect(page.locator(`.project-open-btn[data-project-id="${pid}"]`)).toBeVisible();
     await page.locator(".project-item").first().click({ button: "right" });
     await page.locator("#project-context-menu button[data-action='delete']").click();
     await expect(page.locator("#project-delete-modal")).toBeVisible();
     await page.locator("#btn-project-delete-confirm").click();
-    await expect(page.getByRole("button", { name: /打开 p-delete-target/ })).toHaveCount(0);
+    await expect(page.locator(`.project-open-btn[data-project-id="${pid}"]`)).toHaveCount(0);
     await page.locator("#btn-refresh-projects").click();
-    await expect(page.getByRole("button", { name: /打开 p-delete-target/ })).toHaveCount(0);
+    await expect(page.locator(`.project-open-btn[data-project-id="${pid}"]`)).toHaveCount(0);
   });
 });
 
