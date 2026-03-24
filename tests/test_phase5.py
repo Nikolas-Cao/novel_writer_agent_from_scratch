@@ -82,7 +82,7 @@ class ApiPlannerLLM:
             return _Resp(_fake_extend_window(prompt))
         if "【plan_outline_expand_batch】" in prompt:
             return _Resp(_fake_expand_batch(prompt))
-        if "【plan_outline_skeleton】" in prompt:
+        if "【plan_outline_skeleton_lite】" in prompt or "【plan_outline_skeleton】" in prompt:
             m = re.search(r"目标章节数[：:]\s*(\d+)", prompt)
             n = int(m.group(1)) if m else 12
             return _Resp(_fake_skeleton_volumes(n))
@@ -100,7 +100,9 @@ class ApiPlannerLLM:
                 '{"nodes":[{"id":"hero","name":"主角"}],'
                 '"edges":[{"from_id":"hero","to_id":"case","relation":"调查"}]}'
             )
-        return _Resp("本章摘要：案件推进，悬疑增强。")
+        if "200-500" in prompt and "摘要" in prompt:
+            return _Resp("本章摘要：案件推进，悬疑增强。")
+        raise AssertionError(f"unexpected planner prompt: {prompt[:160]}")
 
 
 class ApiWriterLLM:

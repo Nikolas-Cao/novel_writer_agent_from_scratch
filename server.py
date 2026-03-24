@@ -45,9 +45,6 @@ from rag import LocalRagIndexer, LocalRagRetriever
 from rag.global_kb_chroma import GlobalKbChroma
 from rag.global_kb_retriever import GlobalKbRetriever
 from storage import ChapterStore, CharacterGraphStore, EventLogStore
-from video_pipeline import build_default_character_bible, run_chapter_video_pipeline
-from video_pipeline.providers import GenericCloudTTSProvider, GenericCloudVideoProvider
-from video_pipeline.storage import VideoAssetStore
 
 logger = logging.getLogger(__name__)
 
@@ -160,12 +157,6 @@ class RegenerateChapterRequest(BaseModel):
     enable_chapter_illustrations: Optional[bool] = None
 
 
-class CreateChapterVideoRequest(BaseModel):
-    async_mode: bool = True
-    use_latest_character_bible: bool = True
-    character_bible: Optional[Dict[str, Any]] = None
-
-
 def _default_state(project_id: str) -> Dict[str, Any]:
     return {
         "project_id": project_id,
@@ -202,10 +193,6 @@ def _default_state(project_id: str) -> Dict[str, Any]:
         "kb_assets_text": "",
         "kb_evidence_text": "",
         "kb_confidence": None,
-        "character_bible": None,
-        "chapter_video_plans": {},
-        "chapter_video_jobs": {},
-        "chapter_video_outputs": {},
     }
 
 
@@ -271,17 +258,9 @@ def create_app(
     kb_chroma = GlobalKbChroma(vector_dir)
     _kb_cancel_events: Dict[str, asyncio.Event] = {}
     _kb_background_tasks: Dict[str, asyncio.Task] = {}
-    video_asset_store = VideoAssetStore(root=projects_dir)
-    video_provider = GenericCloudVideoProvider()
-    tts_provider = GenericCloudTTSProvider()
-    _video_cancel_events: Dict[str, asyncio.Event] = {}
-    _video_background_tasks: Dict[str, asyncio.Task] = {}
 
     def _kb_cancel_key(kb_id: str, job_id: str) -> str:
         return f"{kb_id}:{job_id}"
-
-    def _video_cancel_key(project_id: str, job_id: str) -> str:
-        return f"{project_id}:{job_id}"
 
     def _truncate_event_text(text: Any, max_len: int = 300) -> str:
         raw = str(text or "").strip()
@@ -371,16 +350,6 @@ def create_app(
                 chapter_index=chapter_index,
                 ts_offset=idx,
             )
-
-    def _ensure_video_state(state: Dict[str, Any], project_id: str) -> None:
-        if not state.get("character_bible"):
-            state["character_bible"] = build_default_character_bible(project_id)
-        if "chapter_video_plans" not in state or not isinstance(state.get("chapter_video_plans"), dict):
-            state["chapter_video_plans"] = {}
-        if "chapter_video_jobs" not in state or not isinstance(state.get("chapter_video_jobs"), dict):
-            state["chapter_video_jobs"] = {}
-        if "chapter_video_outputs" not in state or not isinstance(state.get("chapter_video_outputs"), dict):
-            state["chapter_video_outputs"] = {}
 
     def _project_has_outline(state: Dict[str, Any]) -> bool:
         outline_structure = state.get("outline_structure") or {}
@@ -544,7 +513,6 @@ def create_app(
                 data[k] = v
         if not has_generated_until:
             data["outline_generated_until"] = _outline_last_index(data.get("outline_structure") or {"volumes": []})
-        _ensure_video_state(data, project_id)
         return data
 
     def save_state(project_id: str, state: Dict[str, Any]) -> None:
@@ -636,28 +604,6 @@ def create_app(
         for project_id in list_project_ids():
             if _is_empty_project(project_id):
                 _delete_project_data(project_id)
-
-    async def _cancel_video_tasks_for_project(project_id: str) -> List[str]:
-        cancelled_job_ids: List[str] = []
-        keys = [k for k in list(_video_background_tasks.keys()) if k.startswith(f"{project_id}:")]
-        for key in keys:
-            ev = _video_cancel_events.get(key)
-            if ev:
-                ev.set()
-            task = _video_background_tasks.get(key)
-            if task:
-                task.cancel()
-            cancelled_job_ids.append(key.split(":", 1)[1])
-        for key in keys:
-            task = _video_background_tasks.get(key)
-            if task:
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-                except Exception:
-                    logger.exception("Error while waiting video task cancellation: %s", key)
-        return cancelled_job_ids
 
     def chapter_meta_of(state: Dict[str, Any], chapter_index: int) -> Optional[Dict[str, Any]]:
         for item in state.get("chapters", []):
@@ -903,136 +849,6 @@ def create_app(
             raise_llm_http_error(exc, scene=scene)
             raise
 
-    def _chapter_video_snapshot(state: Dict[str, Any], chapter_index: int) -> Dict[str, Any]:
-        outputs = state.get("chapter_video_outputs") or {}
-        return (outputs.get(str(int(chapter_index))) or {}).copy()
-
-    async def _run_video_for_chapter(
-        project_id: str,
-        state: Dict[str, Any],
-        chapter_index: int,
-        emit: ProgressFn,
-    ) -> Dict[str, Any]:
-        _ensure_video_state(state, project_id)
-        meta = chapter_meta_of(state, chapter_index)
-        if meta and meta.get("path_or_content_ref"):
-            chapter_text = chapter_store.load_by_ref(str(meta["path_or_content_ref"]))
-        else:
-            chapter_text = chapter_store.load(project_id, chapter_index)
-        chapter_title = str((meta or {}).get("title") or f"第{chapter_index + 1}章")
-        bible = state.get("character_bible") or build_default_character_bible(project_id)
-        result = await run_chapter_video_pipeline(
-            project_id=project_id,
-            chapter_index=chapter_index,
-            chapter_title=chapter_title,
-            chapter_text=chapter_text,
-            character_bible=bible,
-            emit=emit,
-            store=video_asset_store,
-            video_provider=video_provider,
-            tts_provider=tts_provider,
-        )
-        plans = state.setdefault("chapter_video_plans", {})
-        plans[str(chapter_index)] = result.get("plan") or {}
-        outputs = state.setdefault("chapter_video_outputs", {})
-        outputs[str(chapter_index)] = {
-            "plan_ref": result.get("plan_ref"),
-            "qc_ref": result.get("qc_ref"),
-            "timeline_manifest_ref": result.get("timeline_manifest_ref"),
-            "qc_report": result.get("qc_report") or {},
-            "timeline_manifest": result.get("timeline_manifest") or {},
-            "generated_at": int(time.time()),
-        }
-        return result
-
-    async def _video_job_worker(project_id: str, job_id: str, chapter_index: int) -> None:
-        key = _video_cancel_key(project_id, job_id)
-        ev = _video_cancel_events.setdefault(key, asyncio.Event())
-        try:
-            state = load_state(project_id)
-            _ensure_video_state(state, project_id)
-            job = state["chapter_video_jobs"].get(job_id) or {}
-            job.update(
-                {
-                    "job_id": job_id,
-                    "project_id": project_id,
-                    "chapter_index": int(chapter_index),
-                    "status": "running",
-                    "started_at": int(time.time()),
-                    "updated_at": int(time.time()),
-                    "last_stage": "init",
-                    "last_message": "",
-                }
-            )
-            state["chapter_video_jobs"][job_id] = job
-            save_state(project_id, state)
-
-            async def _emit(stage: str, message: str = "") -> None:
-                if ev.is_set():
-                    raise asyncio.CancelledError("video job cancelled by user")
-                st = load_state(project_id)
-                _ensure_video_state(st, project_id)
-                j = st["chapter_video_jobs"].get(job_id) or {}
-                j.update(
-                    {
-                        "job_id": job_id,
-                        "project_id": project_id,
-                        "chapter_index": int(chapter_index),
-                        "status": "running",
-                        "updated_at": int(time.time()),
-                        "last_stage": stage,
-                        "last_message": message,
-                    }
-                )
-                st["chapter_video_jobs"][job_id] = j
-                save_state(project_id, st)
-
-            await _run_video_for_chapter(project_id, state, int(chapter_index), _emit)
-            done = load_state(project_id)
-            _ensure_video_state(done, project_id)
-            j = done["chapter_video_jobs"].get(job_id) or {}
-            j.update(
-                {
-                    "status": "succeeded",
-                    "updated_at": int(time.time()),
-                    "finished_at": int(time.time()),
-                    "output": _chapter_video_snapshot(done, int(chapter_index)),
-                }
-            )
-            done["chapter_video_jobs"][job_id] = j
-            save_state(project_id, done)
-        except asyncio.CancelledError:
-            cancelled = load_state(project_id)
-            _ensure_video_state(cancelled, project_id)
-            j = cancelled["chapter_video_jobs"].get(job_id) or {}
-            j.update(
-                {
-                    "status": "cancelled",
-                    "updated_at": int(time.time()),
-                    "finished_at": int(time.time()),
-                    "last_message": "cancelled",
-                }
-            )
-            cancelled["chapter_video_jobs"][job_id] = j
-            save_state(project_id, cancelled)
-        except Exception as exc:
-            failed = load_state(project_id)
-            _ensure_video_state(failed, project_id)
-            j = failed["chapter_video_jobs"].get(job_id) or {}
-            j.update(
-                {
-                    "status": "failed",
-                    "updated_at": int(time.time()),
-                    "finished_at": int(time.time()),
-                    "error": str(exc),
-                }
-            )
-            failed["chapter_video_jobs"][job_id] = j
-            save_state(project_id, failed)
-        finally:
-            _video_background_tasks.pop(key, None)
-            _video_cancel_events.pop(key, None)
-
     @app.post("/projects")
     async def create_project(req: CreateProjectRequest):
         project_id = req.project_id or f"p-{uuid.uuid4().hex[:12]}"
@@ -1081,8 +897,6 @@ def create_app(
             "selected_kb_ids": state.get("selected_kb_ids") or [],
             "kb_enabled": bool(state.get("kb_enabled")),
             "canon_overrides": state.get("canon_overrides") or [],
-            "character_bible": state.get("character_bible"),
-            "chapter_video_outputs": state.get("chapter_video_outputs") or {},
         }
 
     @app.get("/projects/{project_id}/events")
@@ -1115,13 +929,11 @@ def create_app(
     async def delete_project(project_id: str):
         if not project_exists(project_id):
             raise HTTPException(status_code=404, detail="project not found")
-        cancelled_jobs = await _cancel_video_tasks_for_project(project_id)
         deleted_paths = _delete_project_data(project_id)
         return {
             "project_id": project_id,
             "deleted": True,
             "deleted_paths": deleted_paths,
-            "cancelled_video_jobs": cancelled_jobs,
         }
 
     @app.post("/projects/{project_id}/plot-ideas")
@@ -1664,115 +1476,6 @@ def create_app(
         if stream:
             return StreamingResponse(ndjson_with_progress(_run_rewrite), media_type=NDJSON_MEDIA)
         return await _run_rewrite(_noop_progress)
-
-    @app.get("/projects/{project_id}/videos/chapters/{index}")
-    async def get_chapter_video_output(project_id: str, index: int):
-        if not project_exists(project_id):
-            raise HTTPException(status_code=404, detail="project not found")
-        state = load_state(project_id)
-        _ensure_video_state(state, project_id)
-        output = (state.get("chapter_video_outputs") or {}).get(str(int(index)))
-        if not output:
-            raise HTTPException(status_code=404, detail="chapter video not found")
-        return {
-            "project_id": project_id,
-            "chapter_index": int(index),
-            "output": output,
-        }
-
-    @app.get("/projects/{project_id}/videos/jobs/{job_id}")
-    async def get_video_job(project_id: str, job_id: str):
-        if not project_exists(project_id):
-            raise HTTPException(status_code=404, detail="project not found")
-        state = load_state(project_id)
-        _ensure_video_state(state, project_id)
-        job = (state.get("chapter_video_jobs") or {}).get(job_id)
-        if not job:
-            raise HTTPException(status_code=404, detail="video job not found")
-        return job
-
-    @app.post("/projects/{project_id}/videos/jobs/{job_id}/cancel")
-    async def cancel_video_job(project_id: str, job_id: str):
-        if not project_exists(project_id):
-            raise HTTPException(status_code=404, detail="project not found")
-        key = _video_cancel_key(project_id, job_id)
-        ev = _video_cancel_events.setdefault(key, asyncio.Event())
-        ev.set()
-        state = load_state(project_id)
-        _ensure_video_state(state, project_id)
-        job = (state.get("chapter_video_jobs") or {}).get(job_id)
-        if job:
-            job["status"] = "cancelling"
-            job["updated_at"] = int(time.time())
-            state["chapter_video_jobs"][job_id] = job
-            save_state(project_id, state)
-        return {"ok": True, "job_id": job_id}
-
-    @app.post("/projects/{project_id}/videos/chapters/{index}")
-    async def create_chapter_video(
-        project_id: str,
-        index: int,
-        req: CreateChapterVideoRequest,
-        stream: bool = Query(False),
-    ):
-        if not project_exists(project_id):
-            raise HTTPException(status_code=404, detail="project not found")
-        base_state = load_state(project_id)
-        chapter_meta = chapter_meta_of(base_state, int(index))
-        if chapter_meta is None:
-            raise HTTPException(status_code=404, detail="chapter not found")
-        try:
-            chapter_store.load(project_id, int(index))
-        except FileNotFoundError:
-            raise HTTPException(status_code=404, detail="chapter not found")
-
-        if req.character_bible is not None:
-            base_state["character_bible"] = req.character_bible
-        elif req.use_latest_character_bible:
-            base_state["character_bible"] = base_state.get("character_bible") or build_default_character_bible(project_id)
-        _ensure_video_state(base_state, project_id)
-        save_state(project_id, base_state)
-
-        async def _run_sync(emit: ProgressFn) -> Dict[str, Any]:
-            state = load_state(project_id)
-            _ensure_video_state(state, project_id)
-            await _run_video_for_chapter(project_id, state, int(index), emit)
-            save_state(project_id, state)
-            return {
-                "project_id": project_id,
-                "chapter_index": int(index),
-                "output": _chapter_video_snapshot(state, int(index)),
-            }
-
-        if stream:
-            return StreamingResponse(ndjson_with_progress(_run_sync), media_type=NDJSON_MEDIA)
-
-        if not req.async_mode:
-            return await _run_sync(_noop_progress)
-
-        job_id = f"vj-{uuid.uuid4().hex[:10]}"
-        state = load_state(project_id)
-        _ensure_video_state(state, project_id)
-        state["chapter_video_jobs"][job_id] = {
-            "job_id": job_id,
-            "project_id": project_id,
-            "chapter_index": int(index),
-            "status": "pending",
-            "created_at": int(time.time()),
-            "updated_at": int(time.time()),
-            "last_stage": "queued",
-            "last_message": "已入队，等待执行",
-        }
-        save_state(project_id, state)
-        key = _video_cancel_key(project_id, job_id)
-        task = asyncio.create_task(_video_job_worker(project_id, job_id, int(index)))
-        _video_background_tasks[key] = task
-        return {
-            "job_id": job_id,
-            "status": "pending",
-            "project_id": project_id,
-            "chapter_index": int(index),
-        }
 
     @app.post("/knowledge-bases")
     async def create_knowledge_base(req: CreateKnowledgeBaseRequest):

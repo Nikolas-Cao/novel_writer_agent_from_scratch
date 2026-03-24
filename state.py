@@ -139,8 +139,3 @@ class NovelProjectState(TypedDict, total=False):
     kb_assets_text: str
     kb_evidence_text: str
     kb_confidence: Optional[float]
-    # 章节视频（scene/shot + 角色圣经 + 音频 + 质检 + 时间线）
-    character_bible: Optional[Dict[str, Any]]
-    chapter_video_plans: Optional[Dict[str, Any]]  # chapter_index(str) -> ChapterVideoPlan
-    chapter_video_jobs: Optional[Dict[str, Any]]  # job_id -> job snapshot
-    chapter_video_outputs: Optional[Dict[str, Any]]  # chapter_index(str) -> output refs
