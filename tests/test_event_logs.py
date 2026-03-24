@@ -1,5 +1,7 @@
 import sys
 import uuid
+import re
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -18,6 +20,27 @@ class _PlannerLLM:
     async def ainvoke(self, prompt: str):
         if "plot_ideas" in prompt:
             return _Resp('{"plot_ideas":["剧情概要A"]}')
+        # 注意：extend_window 的 prompt 含有 "plan_outline_extend_window"，
+        # 若先匹配通用 "plan_outline" 会误返回 volumes 结构，导致校验失败。
+        if "plan_outline_extend_window" in prompt:
+            m = re.search(r"本次新增区间：(\d+)\.\.(\d+)", prompt)
+            s = int(m.group(1)) if m else 0
+            e = int(m.group(2)) if m else s
+            chapters = []
+            for g in range(s, e + 1):
+                chapters.append(
+                    {
+                        "global_index": g,
+                        "title": f"第{g + 1}章",
+                        "beat": f"beat{g}",
+                        "points": [f"p1-{g}", f"p2-{g}", f"p3-{g}"],
+                        "depends_on": [g - 1] if g > 0 else [],
+                        "carry_forward": [],
+                        "new_threads": [],
+                        "resolved_threads": [],
+                    }
+                )
+            return _Resp(json.dumps({"chapters": chapters, "repairs": []}, ensure_ascii=False))
         if "plan_outline" in prompt:
             return _Resp(
                 '{"volumes":[{"volume_title":"第一卷","chapters":[{"title":"第一章","points":["A"]}]}]}'
