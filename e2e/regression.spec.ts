@@ -219,6 +219,7 @@ test.describe("UI regressions from past chats", () => {
     await expect(page.locator("#btn-next-chapter")).toBeHidden();
     await expect(page.locator("#btn-regenerate-chapter")).toBeHidden();
     await expect(page.locator("#btn-rewrite")).toBeHidden();
+    await expect(page.locator("#enable-chapter-illustrations-label")).toBeHidden();
 
     await expect(page.locator("#btn-rollback-tail")).toBeVisible();
 
@@ -227,6 +228,7 @@ test.describe("UI regressions from past chats", () => {
 
     await expect(page.locator("#btn-rollback-tail")).toBeHidden();
     await expect(page.locator("#btn-next-chapter")).toBeVisible();
+    await expect(page.locator("#enable-chapter-illustrations-label")).toBeVisible();
   });
 
   test("续写请求未返回期间：三个按钮必须保持 disabled（通过延迟网络请求模拟）", async ({ page, request }) => {
@@ -268,14 +270,13 @@ test.describe("UI regressions from past chats", () => {
     await expect(page.locator("#global-status")).toContainText("失败");
   });
 
-  test("选择非最新章节时：反馈重写区块（含同时更新大纲）应隐藏", async ({ page, request }) => {
+  test("选择非最新章节时：反馈重写按钮应隐藏", async ({ page, request }) => {
     const picked = await findProjectWithMinChapters(request, 2);
     test.skip(!picked, "没有找到至少 2 章的项目");
     const { projectId } = picked!;
     await openProjectFromList(page, projectId);
     await page.getByRole("button", { name: /^第1章：/ }).click();
-    await expect(page.locator("#feedback-rewrite-section")).toBeHidden();
-    await expect(page.locator("#update-outline-checkbox")).toBeHidden();
+    await expect(page.locator("#btn-rewrite")).toBeHidden();
   });
 
   test("续写接口返回 5xx 时：页面不整页刷新，状态栏显示错误", async ({ page, request }) => {
@@ -321,27 +322,31 @@ test.describe("UI regressions from past chats", () => {
     await expect(page.locator("#project-meta")).toContainText(expectedNameB);
   });
 
-  test("切换项目时：反馈输入与同时更新大纲应重置", async ({ page, request }) => {
+  test("切换项目时：反馈重写弹窗输入与勾选应重置", async ({ page, request }) => {
     const picked = await findProjectsWithMinChapters(request, 1, 2);
     test.skip(picked.length < 2, "至少需要 2 个项目且每个项目至少 1 章");
     const [a, b] = picked;
 
     await openProjectFromList(page, a.projectId);
-    await expect(page.locator("#feedback-rewrite-section")).toBeVisible();
-
-    await page.locator("#feedback-input").fill("这是反馈 A");
-    const updateOutline = page.locator("#update-outline-checkbox");
+    await expect(page.locator("#btn-rewrite")).toBeVisible();
+    await page.locator("#btn-rewrite").click();
+    await expect(page.locator("#feedback-rewrite-modal")).toBeVisible();
+    await page.locator("#feedback-modal-input").fill("这是反馈 A");
+    const updateOutline = page.locator("#feedback-modal-update-outline-checkbox");
     await updateOutline.check();
     await expect(updateOutline).toBeChecked();
 
+    await page.locator("#btn-feedback-rewrite-cancel").click();
+    await expect(page.locator("#feedback-rewrite-modal")).toBeHidden();
     await page.locator(`.project-open-btn[data-project-id="${b.projectId}"]`).click();
     await expect(page.locator("#global-status")).toContainText(`已打开 ${b.projectId}`);
-
-    await expect(page.locator("#feedback-input")).toHaveValue("");
-    await expect(page.locator("#update-outline-checkbox")).not.toBeChecked();
+    await page.locator("#btn-rewrite").click();
+    await expect(page.locator("#feedback-rewrite-modal")).toBeVisible();
+    await expect(page.locator("#feedback-modal-input")).toHaveValue("");
+    await expect(page.locator("#feedback-modal-update-outline-checkbox")).not.toBeChecked();
   });
 
-  test("提交反馈重写后：反馈输入与同时更新大纲应重置（stub rewrite stream）", async ({
+  test("提交反馈重写后：弹窗关闭并重置输入与勾选（stub rewrite stream）", async ({
     page,
     request,
   }) => {
@@ -351,10 +356,11 @@ test.describe("UI regressions from past chats", () => {
 
     await openProjectFromList(page, projectId);
     await expect(page.locator("#btn-rewrite")).toBeVisible();
-    await expect(page.locator("#feedback-rewrite-section")).toBeVisible();
+    await page.locator("#btn-rewrite").click();
+    await expect(page.locator("#feedback-rewrite-modal")).toBeVisible();
 
-    await page.locator("#feedback-input").fill("这是反馈 B");
-    const updateOutline = page.locator("#update-outline-checkbox");
+    await page.locator("#feedback-modal-input").fill("这是反馈 B");
+    const updateOutline = page.locator("#feedback-modal-update-outline-checkbox");
     await updateOutline.check();
     await expect(updateOutline).toBeChecked();
 
@@ -373,6 +379,12 @@ test.describe("UI regressions from past chats", () => {
       `{"type":"result","body":{"chapter_index":${chapterIndex}}}\n`;
 
     await page.route(rewriteUrlPattern, async (route) => {
+      const body = route.request().postDataJSON() as {
+        user_feedback?: string;
+        update_outline?: boolean;
+      };
+      expect(body.user_feedback).toBe("这是反馈 B");
+      expect(body.update_outline).toBeTruthy();
       await route.fulfill({
         status: 200,
         contentType: "application/x-ndjson",
@@ -380,11 +392,71 @@ test.describe("UI regressions from past chats", () => {
       });
     });
 
-    await page.locator("#btn-rewrite").click();
+    await page.locator("#btn-feedback-rewrite-confirm").click();
     await expect(page.locator("#global-status")).toContainText("重写完成", { timeout: 20000 });
+    await expect(page.locator("#feedback-rewrite-modal")).toBeHidden();
+    await page.locator("#btn-rewrite").click();
+    await expect(page.locator("#feedback-modal-input")).toHaveValue("");
+    await expect(page.locator("#feedback-modal-update-outline-checkbox")).not.toBeChecked();
+  });
 
-    await expect(page.locator("#feedback-input")).toHaveValue("");
-    await expect(page.locator("#update-outline-checkbox")).not.toBeChecked();
+  test("反馈重写弹窗取消后：关闭弹窗且不触发 rewrite 请求", async ({ page, request }) => {
+    const picked = await findProjectWithMinChapters(request, 1);
+    test.skip(!picked, "没有找到至少 1 章的项目");
+    const { projectId } = picked!;
+    await openProjectFromList(page, projectId);
+    await expect(page.locator("#btn-rewrite")).toBeVisible();
+
+    let rewriteCalled = false;
+    const rewriteUrlPattern = new RegExp(`/projects/${projectId}/chapters/\\d+/rewrite\\?stream=1`);
+    await page.route(rewriteUrlPattern, async (route) => {
+      rewriteCalled = true;
+      await route.abort();
+    });
+
+    await page.locator("#btn-rewrite").click();
+    await expect(page.locator("#feedback-rewrite-modal")).toBeVisible();
+    await page.locator("#feedback-modal-input").fill("先不提交");
+    await page.locator("#btn-feedback-rewrite-cancel").click();
+    await expect(page.locator("#feedback-rewrite-modal")).toBeHidden();
+    expect(rewriteCalled).toBeFalsy();
+  });
+
+  test("反馈重写：点击确认后应立即关闭弹窗（请求进行中）", async ({ page, request }) => {
+    const picked = await findProjectWithMinChapters(request, 1);
+    test.skip(!picked, "没有找到至少 1 章的项目");
+    const { projectId } = picked!;
+    await openProjectFromList(page, projectId);
+    await expect(page.locator("#btn-rewrite")).toBeVisible();
+    await page.locator("#btn-rewrite").click();
+    await expect(page.locator("#feedback-rewrite-modal")).toBeVisible();
+    await page.locator("#feedback-modal-input").fill("立即关闭弹窗测试");
+
+    const selectedLi = page.locator("#chapter-list li.is-selected");
+    await expect(selectedLi).toBeVisible();
+    const chapterIndexAttr = await selectedLi.getAttribute("data-index");
+    test.skip(!chapterIndexAttr, "未能读取选中章节 index");
+    const chapterIndex = Number(chapterIndexAttr);
+    if (!Number.isFinite(chapterIndex)) test.skip(true, "章节 index 非数字");
+
+    const rewriteUrlPattern = new RegExp(
+      `/projects/${projectId}/chapters/${chapterIndex}/rewrite\\?stream=1`
+    );
+    const ndjson =
+      `{"type":"progress","stage":"refine_chapter_stream","message":"处理中"}\n` +
+      `{"type":"result","body":{"chapter_index":${chapterIndex}}}\n`;
+    await page.route(rewriteUrlPattern, async (route) => {
+      await new Promise((r) => setTimeout(r, 1200));
+      await route.fulfill({
+        status: 200,
+        contentType: "application/x-ndjson",
+        body: ndjson,
+      });
+    });
+
+    await page.locator("#btn-feedback-rewrite-confirm").click();
+    await expect(page.locator("#feedback-rewrite-modal")).toBeHidden({ timeout: 200 });
+    await expect(page.locator("#global-status")).toContainText("重写完成", { timeout: 20000 });
   });
 
   test("打开项目后：章节列表中选中项应滚动到可见（最新章节）", async ({ page, request }) => {
@@ -604,6 +676,112 @@ test.describe("UI regressions from past chats", () => {
     await page.getByRole("button", { name: "弹窗查看人物关系" }).click();
     await expect(page.locator("#character-graph-modal")).toBeVisible();
     await expect(page.locator("#character-graph-modal-content")).toBeVisible();
+  });
+
+  test("章节全文/人物关系弹窗：重复打开时滚动位置应重置到顶部", async ({ page }) => {
+    const pid = "p-modal-scroll-reset";
+    const longChapter = Array.from({ length: 240 }, (_, i) => `第${i + 1}行正文`).join("\n");
+    const graphNodes = Array.from({ length: 120 }, (_, i) => ({
+      id: `n${i + 1}`,
+      name: `人物${i + 1}`,
+      description: `描述${i + 1}`,
+    }));
+    const graphEdges = Array.from({ length: 80 }, (_, i) => ({
+      from_id: `n${(i % 40) + 1}`,
+      to_id: `n${(i % 40) + 41}`,
+      relation: "关联",
+      note: `关系${i + 1}`,
+    }));
+
+    await page.route("**/projects**", async (route) => {
+      const req = route.request();
+      const url = new URL(req.url());
+      const method = req.method();
+      const path = url.pathname.replace(/\/$/, "") || "/";
+
+      if (method === "GET" && path === "/projects") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            projects: [{ project_id: pid, created_at: 1700000000 }],
+          }),
+        });
+        return;
+      }
+      if (method === "GET" && path === `/projects/${pid}`) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            project_id: pid,
+            instruction: "stub",
+            selected_plot_summary: "stub",
+            outline_structure: {
+              volumes: [{ volume_title: "卷1", chapters: [{ title: "第一章", points: ["stub"] }] }],
+            },
+            chapters: [{ index: 0, title: "第一章", word_count: 5000 }],
+            current_chapter_index: 0,
+            total_chapters: 1,
+            chapter_word_target: 3000,
+            enable_chapter_illustrations: false,
+            created_at: 1700000000,
+            token_usage: {},
+          }),
+        });
+        return;
+      }
+      if (method === "GET" && path === `/projects/${pid}/chapters/0`) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ index: 0, content: longChapter, meta: {} }),
+        });
+        return;
+      }
+      if (method === "GET" && path === `/projects/${pid}/character-graph`) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ character_graph: { nodes: graphNodes, edges: graphEdges } }),
+        });
+        return;
+      }
+
+      await route.continue();
+    });
+
+    await page.goto("/");
+    await page.locator(`.project-open-btn[data-project-id="${pid}"]`).click();
+    await expect(page.locator("#global-status")).toContainText(`已打开 ${pid}`);
+
+    const chapterContent = page.locator("#chapter-modal-content");
+    await page.locator("#btn-view-chapter-modal").click();
+    await expect(page.locator("#chapter-modal")).toBeVisible();
+    await chapterContent.evaluate((node) => {
+      node.scrollTop = 600;
+    });
+    await expect(chapterContent.evaluate((node) => node.scrollTop)).resolves.toBeGreaterThan(0);
+    await page.locator("#btn-close-chapter-modal").click();
+    await expect(page.locator("#chapter-modal")).toBeHidden();
+    await page.locator("#btn-view-chapter-modal").click();
+    await expect(page.locator("#chapter-modal")).toBeVisible();
+    await expect(chapterContent.evaluate((node) => node.scrollTop)).resolves.toBe(0);
+    await page.locator("#btn-close-chapter-modal").click();
+
+    const graphContent = page.locator("#character-graph-modal-content");
+    await page.locator("#btn-view-character-graph-modal").click();
+    await expect(page.locator("#character-graph-modal")).toBeVisible();
+    await expect(graphContent.locator(".graph-meta")).toBeVisible();
+    await graphContent.evaluate((node) => {
+      node.scrollTop = 600;
+    });
+    await expect(graphContent.evaluate((node) => node.scrollTop)).resolves.toBeGreaterThan(0);
+    await page.locator("#btn-close-character-graph-modal").click();
+    await expect(page.locator("#character-graph-modal")).toBeHidden();
+    await page.locator("#btn-view-character-graph-modal").click();
+    await expect(page.locator("#character-graph-modal")).toBeVisible();
+    await expect(graphContent.evaluate((node) => node.scrollTop)).resolves.toBe(0);
   });
 
   test("项目列表右键：应展示自定义菜单", async ({ page }) => {

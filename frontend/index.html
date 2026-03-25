@@ -101,14 +101,6 @@
             <button type="button" id="btn-view-character-graph-modal">弹窗查看人物关系</button>
             <button type="button" id="btn-view-event-logs">查看事件日志</button>
           </div>
-          <div id="feedback-rewrite-section">
-            <h3>反馈重写</h3>
-            <textarea id="feedback-input" rows="3" placeholder="例如：把结尾改得更悬疑"></textarea>
-            <label class="checkbox">
-              <input type="checkbox" id="update-outline-checkbox" />
-              同时更新大纲
-            </label>
-          </div>
           <label class="checkbox" id="enable-chapter-illustrations-label">
             <input type="checkbox" id="enable-chapter-illustrations-checkbox" />
             开启图片生成（续写 / 重新生成 / 反馈重写时尝试生成章节插图）
@@ -156,6 +148,27 @@
         <button type="button" id="btn-close-event-log-modal" class="btn-modal-close">关闭</button>
       </div>
       <div id="event-log-modal-content" class="modal-content"></div>
+    </div>
+  </div>
+  <div id="feedback-rewrite-modal" class="modal" hidden>
+    <div class="modal-backdrop" data-close-feedback-rewrite="true"></div>
+    <div class="modal-dialog modal-dialog-sm" role="dialog" aria-modal="true" aria-labelledby="feedback-rewrite-modal-title">
+      <div class="modal-head">
+        <h3 id="feedback-rewrite-modal-title">反馈重写</h3>
+        <button type="button" id="btn-close-feedback-rewrite-modal" class="btn-modal-close">关闭</button>
+      </div>
+      <div class="modal-content feedback-rewrite-modal-content">
+        <label for="feedback-modal-input">反馈内容</label>
+        <textarea id="feedback-modal-input" rows="4" placeholder="例如：把结尾改得更悬疑"></textarea>
+        <label class="checkbox">
+          <input type="checkbox" id="feedback-modal-update-outline-checkbox" />
+          同时更新大纲
+        </label>
+        <div class="row">
+          <button type="button" id="btn-feedback-rewrite-cancel">取消</button>
+          <button type="button" id="btn-feedback-rewrite-confirm">确认提交反馈重写</button>
+        </div>
+      </div>
     </div>
   </div>
   <div id="project-context-menu" class="context-menu" role="menu" hidden>

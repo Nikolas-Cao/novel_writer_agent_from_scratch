@@ -75,7 +75,7 @@ test.describe("事件日志弹窗", () => {
     });
 
     await page.goto("/");
-    await page.getByRole("button", { name: `打开 ${pid}` }).click();
+    await page.locator(`.project-open-btn[data-project-id="${pid}"]`).click();
     await expect(page.locator("#global-status")).toContainText(`已打开 ${pid}`);
 
     await expect(page.locator("#btn-view-event-logs")).toBeVisible();

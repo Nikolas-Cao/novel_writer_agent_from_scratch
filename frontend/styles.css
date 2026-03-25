@@ -738,6 +738,14 @@ button:disabled:active {
   padding: 14px;
 }
 
+.feedback-rewrite-modal-content {
+  padding: 14px;
+}
+
+.feedback-rewrite-modal-content textarea {
+  min-height: 110px;
+}
+
 .danger-btn {
   background: linear-gradient(135deg, #dc2626, #b91c1c) !important;
   box-shadow: 0 4px 10px rgba(185, 28, 28, 0.28) !important;

@@ -526,10 +526,14 @@ const el = {
   btnCloseChapterModal: document.getElementById("btn-close-chapter-modal"),
   btnCloseCharacterGraphModal: document.getElementById("btn-close-character-graph-modal"),
   btnCloseEventLogModal: document.getElementById("btn-close-event-log-modal"),
-  feedbackRewriteSection: document.getElementById("feedback-rewrite-section"),
-  feedback: document.getElementById("feedback-input"),
-  updateOutline: document.getElementById("update-outline-checkbox"),
+  enableChapterIllustrationsLabel: document.getElementById("enable-chapter-illustrations-label"),
   enableChapterIllustrations: document.getElementById("enable-chapter-illustrations-checkbox"),
+  feedbackRewriteModal: document.getElementById("feedback-rewrite-modal"),
+  feedbackModalInput: document.getElementById("feedback-modal-input"),
+  feedbackModalUpdateOutline: document.getElementById("feedback-modal-update-outline-checkbox"),
+  btnFeedbackRewriteConfirm: document.getElementById("btn-feedback-rewrite-confirm"),
+  btnFeedbackRewriteCancel: document.getElementById("btn-feedback-rewrite-cancel"),
+  btnCloseFeedbackRewriteModal: document.getElementById("btn-close-feedback-rewrite-modal"),
   btnRefreshProjects: document.getElementById("btn-refresh-projects"),
   btnNewProject: document.getElementById("btn-new-project"),
   btnGenerateIdeas: document.getElementById("btn-generate-ideas"),
@@ -676,8 +680,9 @@ function updateChapterActionButtons() {
     el.btnRollbackTail.disabled = !hasSelection;
     el.btnRollbackTail.title = hasSelection ? "" : "请先在章节列表中打开一个章节";
   }
-  if (el.feedbackRewriteSection) {
-    el.feedbackRewriteSection.hidden = !canModify;
+  if (el.enableChapterIllustrationsLabel) {
+    // 与写作操作保持一致：非最新章节禁止改写/续写时，不展示插图开关，避免误导用户。
+    el.enableChapterIllustrationsLabel.hidden = !showWriteActions;
   }
 }
 
@@ -1140,9 +1145,10 @@ async function loadProjects() {
 
 async function openProject(projectId) {
   state.currentProjectId = projectId;
-  // 切换项目/重新打开项目时，避免遗留上一项目的反馈输入与勾选状态。
-  if (el.feedback) el.feedback.value = "";
-  if (el.updateOutline) el.updateOutline.checked = false;
+  // 切换项目/重新打开项目时，清理反馈重写弹窗状态，避免跨项目残留输入。
+  if (el.feedbackModalInput) el.feedbackModalInput.value = "";
+  if (el.feedbackModalUpdateOutline) el.feedbackModalUpdateOutline.checked = false;
+  if (el.feedbackRewriteModal) el.feedbackRewriteModal.hidden = true;
   renderProjectList(state.projectIds);
   setStatus(`打开项目 ${projectId} ...`);
   try {
@@ -1523,6 +1529,7 @@ function openChapterModal() {
   }
   el.chapterModalContent.innerHTML = chapterHtml;
   el.chapterModal.hidden = false;
+  resetModalContentScrollToTop(el.chapterModalContent);
 }
 
 function closeChapterModal() {
@@ -1539,12 +1546,30 @@ async function openCharacterGraphModal() {
   const chapterIndex = Number(state.selectedChapterIndex);
   el.characterGraphModalContent.innerHTML = "<p>人物关系加载中...</p>";
   el.characterGraphModal.hidden = false;
+  resetModalContentScrollToTop(el.characterGraphModalContent);
   const data = await loadChapterCharacterGraph(chapterIndex);
   if (!data) {
     el.characterGraphModalContent.innerHTML = "<p>人物关系加载失败</p>";
+    resetModalContentScrollToTop(el.characterGraphModalContent);
     return;
   }
   el.characterGraphModalContent.innerHTML = buildChapterCharacterGraphHtml(data, chapterIndex);
+  resetModalContentScrollToTop(el.characterGraphModalContent);
+}
+
+function resetModalContentScrollToTop(node) {
+  if (!node) return;
+  // 先立即复位，再在下一帧兜底复位，避免浏览器在重排后回弹到历史滚动位置。
+  node.scrollTop = 0;
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(() => {
+      node.scrollTop = 0;
+    });
+    return;
+  }
+  window.setTimeout(() => {
+    node.scrollTop = 0;
+  }, 0);
 }
 
 function closeCharacterGraphModal() {
@@ -1796,11 +1821,16 @@ async function rewriteChapter() {
     setStatus("请先在章节列表中打开一个章节");
     return;
   }
-  const feedback = el.feedback.value.trim();
+  const feedback = (el.feedbackModalInput && el.feedbackModalInput.value.trim()) || "";
+  const shouldUpdateOutline = Boolean(
+    el.feedbackModalUpdateOutline && el.feedbackModalUpdateOutline.checked
+  );
   if (!feedback) {
     setStatus("请输入反馈内容");
     return;
   }
+  // 确认后立即关闭弹窗，保留后台执行；参数已提前快照，不受 closeFeedbackRewriteModal 重置影响。
+  closeFeedbackRewriteModal();
   setStatus("重写中...");
   state.isChapterWriteInProgress = true;
   updateChapterActionButtons();
@@ -1815,7 +1845,7 @@ async function rewriteChapter() {
       `/projects/${state.currentProjectId}/chapters/${state.selectedChapterIndex}/rewrite`,
       {
         user_feedback: feedback,
-        update_outline: el.updateOutline.checked,
+        update_outline: shouldUpdateOutline,
         enable_chapter_illustrations: illustrationFlagForApi(),
       },
       onProgress
@@ -1832,6 +1862,34 @@ async function rewriteChapter() {
     setChapterNavigationLocked(false);
     setGlobalInteractionLocked(false);
   }
+}
+
+function openFeedbackRewriteModal() {
+  if (!el.feedbackRewriteModal) return;
+  if (!state.currentProjectId) {
+    setStatus("请先创建或打开项目");
+    return;
+  }
+  if (state.selectedChapterIndex === null) {
+    setStatus("请先在章节列表中打开一个章节");
+    return;
+  }
+  if (!isLatestChapterSelected()) {
+    setStatus("仅支持对最新章节操作，避免后续章节逻辑断裂");
+    return;
+  }
+  if (state.isChapterWriteInProgress || state.isOutlineWindowGenerating) return;
+  el.feedbackRewriteModal.hidden = false;
+  window.setTimeout(() => {
+    if (el.feedbackModalInput) el.feedbackModalInput.focus();
+  }, 0);
+}
+
+function closeFeedbackRewriteModal() {
+  if (!el.feedbackRewriteModal) return;
+  el.feedbackRewriteModal.hidden = true;
+  if (el.feedbackModalInput) el.feedbackModalInput.value = "";
+  if (el.feedbackModalUpdateOutline) el.feedbackModalUpdateOutline.checked = false;
 }
 
 async function regenerateCurrentChapter() {
@@ -1898,7 +1956,10 @@ function bindEvents() {
   bindClick(el.btnNextChapter, writeNextChapter);
   bindClick(el.btnRollbackTail, rollbackTailFromSelectedChapter);
   bindClick(el.btnRegenerateChapter, regenerateCurrentChapter);
-  bindClick(el.btnRewrite, rewriteChapter);
+  bindClick(el.btnRewrite, openFeedbackRewriteModal);
+  bindClick(el.btnFeedbackRewriteConfirm, rewriteChapter);
+  bindClick(el.btnFeedbackRewriteCancel, closeFeedbackRewriteModal);
+  bindClick(el.btnCloseFeedbackRewriteModal, closeFeedbackRewriteModal);
   bindClick(el.btnViewChapterModal, openChapterModal);
   bindClick(el.btnViewCharacterGraphModal, openCharacterGraphModal);
   bindClick(el.btnViewEventLogs, openEventLogModal);
@@ -1956,6 +2017,13 @@ function bindEvents() {
       }
     });
   }
+  if (el.feedbackRewriteModal) {
+    el.feedbackRewriteModal.addEventListener("click", (event) => {
+      if (event.target && event.target.getAttribute("data-close-feedback-rewrite") === "true") {
+        closeFeedbackRewriteModal();
+      }
+    });
+  }
   if (el.projectRenameModal) {
     el.projectRenameModal.addEventListener("click", (event) => {
       if (event.target && event.target.getAttribute("data-close-rename") === "true") {
@@ -1983,6 +2051,7 @@ function bindEvents() {
       closeChapterModal();
       closeCharacterGraphModal();
       closeEventLogModal();
+      closeFeedbackRewriteModal();
       closeProjectContextMenu();
       closeRenameModal();
       closeDeleteModal();
