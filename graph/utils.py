@@ -28,17 +28,49 @@ async def invoke_and_parse_with_retry(
     get_text = get_text_fn or get_message_text
     last_error: Optional[Exception] = None
     for attempt in range(max_retries):
+        attempt_no = attempt + 1
         try:
             resp = await llm.ainvoke(prompt)
+        except Exception as e:
+            last_error = e
+            logger.warning(
+                "invoke_and_parse_with_retry: attempt %s/%s invoke failed | error_type=%s | error=%r | llm_type=%s | parse_fn=%s | prompt_chars=%s",
+                attempt_no,
+                max_retries,
+                type(e).__name__,
+                e,
+                type(llm).__name__,
+                getattr(parse_fn, "__name__", str(parse_fn)),
+                len(prompt or ""),
+                exc_info=True,
+            )
+            if attempt == max_retries - 1:
+                raise
+            continue
+
+        # 思路：
+        # 1) 模型调用成功后，先把响应统一转成文本；
+        # 2) 若解析失败，额外打印响应长度与前 500 字预览，帮助判断是格式问题还是内容被截断；
+        # 3) 预览只打印片段，避免日志过大且降低泄露整段提示词/正文的风险。
+        try:
             text = get_text(resp)
             return parse_fn(text)
         except Exception as e:
             last_error = e
+            preview = str(text if "text" in locals() else resp)
+            preview = preview[:500].replace("\n", "\\n")
             logger.warning(
-                "invoke_and_parse_with_retry: attempt %s/%s failed: %s",
-                attempt + 1,
+                "invoke_and_parse_with_retry: attempt %s/%s parse failed | error_type=%s | error=%r | llm_type=%s | parse_fn=%s | prompt_chars=%s | response_chars=%s | response_preview=%s",
+                attempt_no,
                 max_retries,
+                type(e).__name__,
                 e,
+                type(llm).__name__,
+                getattr(parse_fn, "__name__", str(parse_fn)),
+                len(prompt or ""),
+                len(str(text if "text" in locals() else "")),
+                preview,
+                exc_info=True,
             )
             if attempt == max_retries - 1:
                 raise

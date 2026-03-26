@@ -565,6 +565,12 @@ button:disabled:active {
   color: #2563eb;
 }
 
+.outline-desc {
+  list-style-type: circle;
+  color: #334155;
+  font-style: italic;
+}
+
 .outline-header-row {
   display: flex;
   align-items: center;

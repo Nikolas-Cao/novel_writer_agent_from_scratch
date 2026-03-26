@@ -43,6 +43,7 @@ class FakePlannerLLM:
                     {
                         "global_index": g,
                         "title": f"第{g + 1}章",
+                        "description": f"第{g + 1}章约20字简述",
                         "beat": f"beat{g}",
                         "points": [f"p1-{g}", f"p2-{g}", f"p3-{g}"],
                         "depends_on": [g - 1] if g > 0 else [],
@@ -61,13 +62,19 @@ class FakePlannerLLM:
             indices = [int(x) for x in raw.split(",") if x.strip().isdigit()]
             chapters = [{"global_index": g, "points": [f"a-{g}", f"b-{g}", f"c-{g}"]} for g in indices]
             return _Resp(json.dumps({"chapters": chapters}, ensure_ascii=False))
-        if "【plan_outline_skeleton】" in prompt:
-            m = re.search(r"目标章节数[：:]\s*(\d+)", prompt)
-            n = int(m.group(1)) if m else 12
-            chs = [{"title": f"第{i + 1}章", "beat": f"beat{i}", "points": []} for i in range(n)]
-            return _Resp(
-                json.dumps({"volumes": [{"volume_title": "第一卷", "chapters": chs}]}, ensure_ascii=False)
-            )
+        if "【plan_outline_skeleton_lite】" in prompt or "【plan_outline_skeleton】" in prompt:
+            m = re.search(r"本批区间[：:]\s*(\d+)\.\.(\d+)", prompt)
+            s = int(m.group(1)) if m else 0
+            e = int(m.group(2)) if m else s
+            chapters = [
+                {
+                    "global_index": i,
+                    "title": f"第{i + 1}章",
+                    "description": f"第{i + 1}章约20字简述",
+                }
+                for i in range(s, e + 1)
+            ]
+            return _Resp(json.dumps({"chapters": chapters}, ensure_ascii=False))
         if "【plan_outline_single】" in prompt:
             m = re.search(r"目标章节数[：:]\s*(\d+)", prompt)
             n = int(m.group(1)) if m else 1
@@ -135,8 +142,47 @@ def test_plan_outline_multi_phase_batches_and_rag():
         refs.extend(vol.get("chapters") or [])
     for i in range(generated_until + 1):
         assert isinstance(refs[i].get("points"), list) and len(refs[i]["points"]) >= 1
+    assert str(refs[0].get("description") or "").strip()
     assert idx.outline_chunks == n
     assert outline_structure_to_string(structure)
+
+
+def test_plan_outline_skeleton_batch_alignment_202():
+    from graph.nodes.plan_outline import plan_outline_node
+
+    n = 202
+    state = {"selected_plot_summary": "分批对齐测试", "total_chapters": n}
+    out = asyncio.run(plan_outline_node(state, llm=FakePlannerLLM()))
+    structure = out["outline_structure"]
+    refs = []
+    for vol in structure.get("volumes") or []:
+        refs.extend(vol.get("chapters") or [])
+    assert len(refs) == n
+    assert str(refs[0].get("description") or "").strip()
+    assert str(refs[-1].get("description") or "").strip()
+
+
+def test_skeleton_lite_parse_payload_accepts_short_and_long_keys():
+    from graph.nodes.outline_skeleton_lite import _parse_batch_payload
+
+    short_data = {
+        "chapters": [
+            {"g": 0, "t": "第1章", "d": "第1章约20字简述"},
+            {"g": 1, "t": "第2章", "d": "第2章约20字简述"},
+        ]
+    }
+    long_data = {
+        "chapters": [
+            {"global_index": 0, "title": "第1章", "description": "第1章约20字简述"},
+            {"global_index": 1, "title": "第2章", "description": "第2章约20字简述"},
+        ]
+    }
+
+    out_short = _parse_batch_payload(short_data, 0, 1)
+    out_long = _parse_batch_payload(long_data, 0, 1)
+    assert out_short == out_long
+    assert out_short[0]["title"] == "第1章"
+    assert out_short[1]["description"] == "第2章约20字简述"
 
 
 def test_plan_outline_extend_with_repair_and_continuity_fields():
@@ -235,6 +281,48 @@ def test_write_and_refine_chapter():
     shutil.rmtree(root, ignore_errors=True)
 
 
+def test_write_and_refine_prompt_contains_style_constraint():
+    from graph.nodes.refine_chapter import refine_chapter_node
+    from graph.nodes.write_chapter import write_chapter_node
+    from storage import ChapterStore
+
+    class CaptureWriterLLM:
+        def __init__(self) -> None:
+            self.prompts = []
+
+        async def ainvoke(self, prompt: str):
+            self.prompts.append(prompt)
+            if "润色" in prompt:
+                return _Resp("# 第一章\n\n润色版本。")
+            return _Resp("# 第一章\n\n初稿版本。")
+
+    root = _tmp_root()
+    store = ChapterStore(root=root)
+    llm = CaptureWriterLLM()
+    state = {
+        "project_id": "p-style",
+        "current_chapter_index": 0,
+        "chapter_word_target": 800,
+        "style_constraint": "冷峻克制，短句，减少抒情。",
+        "outline_structure": {
+            "volumes": [
+                {
+                    "volume_title": "第一卷",
+                    "chapters": [{"title": "第一章 雨夜来信", "points": ["收到信件", "开始调查"]}],
+                }
+            ]
+        },
+        "chapters": [],
+    }
+    out1 = asyncio.run(write_chapter_node(state, llm=llm, chapter_store=store))
+    out2 = asyncio.run(refine_chapter_node({**state, **out1}, llm=llm, chapter_store=store))
+    assert out2["current_chapter_final"].startswith("# ")
+    assert any("【文风约束】" in p and "冷峻克制" in p for p in llm.prompts)
+    assert any("请严格遵守上述文风约束" in p for p in llm.prompts)
+
+    shutil.rmtree(root, ignore_errors=True)
+
+
 def test_workflow_runs_and_checkpoint_available():
     from graph.workflow import build_stage2_workflow
     from storage import ChapterStore
@@ -276,6 +364,7 @@ def run_all():
     test_plan_outline_extend_with_repair_and_continuity_fields()
     test_plan_outline_extend_skip_repair_for_written_chapters()
     test_write_and_refine_chapter()
+    test_write_and_refine_prompt_contains_style_constraint()
     test_workflow_runs_and_checkpoint_available()
     print("Phase 2 acceptance: all passed.")
 

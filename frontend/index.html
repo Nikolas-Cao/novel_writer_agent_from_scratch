@@ -83,6 +83,7 @@
           <div class="outline-header-row">
             <h3>大纲</h3>
             <div class="outline-window-controls">
+              <button type="button" id="btn-style-constraint">文风约束</button>
               <span id="outline-window-range-label" class="outline-window-range-label">下一窗口：-</span>
               <button type="button" id="btn-generate-outline-range">生成下一窗口大纲</button>
             </div>
@@ -167,6 +168,23 @@
         <div class="row">
           <button type="button" id="btn-feedback-rewrite-cancel">取消</button>
           <button type="button" id="btn-feedback-rewrite-confirm">确认提交反馈重写</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="style-constraint-modal" class="modal" hidden>
+    <div class="modal-backdrop" data-close-style-constraint="true"></div>
+    <div class="modal-dialog modal-dialog-sm" role="dialog" aria-modal="true" aria-labelledby="style-constraint-modal-title">
+      <div class="modal-head">
+        <h3 id="style-constraint-modal-title">文风约束</h3>
+        <button type="button" id="btn-close-style-constraint-modal" class="btn-modal-close">关闭</button>
+      </div>
+      <div class="modal-content">
+        <label for="style-constraint-input">填写文风约束（用于写章与润色）</label>
+        <textarea id="style-constraint-input" rows="6" placeholder="例如：整体偏克制、冷峻，短句为主，避免网络化口语。"></textarea>
+        <div class="row">
+          <button type="button" id="btn-style-constraint-cancel">取消</button>
+          <button type="button" id="btn-style-constraint-save">保存</button>
         </div>
       </div>
     </div>

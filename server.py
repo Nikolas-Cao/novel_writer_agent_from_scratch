@@ -109,6 +109,7 @@ async def ndjson_with_progress(run: Callable[[ProgressFn], Awaitable[Any]]) -> A
 class CreateProjectRequest(BaseModel):
     project_id: Optional[str] = None
     instruction: Optional[str] = ""
+    style_constraint: Optional[str] = None
     total_chapters: Optional[int] = None
     chapter_word_target: Optional[int] = None
     enable_chapter_illustrations: Optional[bool] = None
@@ -117,6 +118,7 @@ class CreateProjectRequest(BaseModel):
 
 class PatchProjectRequest(BaseModel):
     nickname: Optional[str] = None
+    style_constraint: Optional[str] = None
 
 
 class PatchProjectKnowledgeRequest(BaseModel):
@@ -144,12 +146,14 @@ class OutlineWindowRequest(BaseModel):
 class NextChapterRequest(BaseModel):
     chapter_word_target: Optional[int] = None
     enable_chapter_illustrations: Optional[bool] = None
+    style_constraint: Optional[str] = None
 
 
 class RewriteRequest(BaseModel):
     user_feedback: str = Field(..., min_length=1)
     update_outline: bool = False
     enable_chapter_illustrations: Optional[bool] = None
+    style_constraint: Optional[str] = None
 
 
 class RegenerateChapterRequest(BaseModel):
@@ -162,6 +166,7 @@ def _default_state(project_id: str) -> Dict[str, Any]:
         "project_id": project_id,
         "nickname": None,
         "instruction": "",
+        "style_constraint": "",
         "plot_ideas": [],
         "selected_plot_summary": "",
         "outline": "",
@@ -677,9 +682,11 @@ def create_app(
             rows.append(f"- {g}: {ch.get('title') or f'第{g + 1}章'} | {'；'.join(str(p) for p in pts[:3]) if pts else '（无）'}")
         recent_outline_points = "\n".join(rows) if rows else "（无）"
 
+        # 约束块只保留“创作意图 + 二创覆盖”：
+        # - 剧情概要(selected_plot_summary)已经在 outline_extend_window 的主 prompt 中单独注入；
+        # - 若这里再次注入，会造成同一语义重复，增加 token 且可能放大模型对重复文本的偏置。
         constraints = (
             f"创作意图：{state.get('instruction') or '（无）'}\n"
-            f"剧情概要：{state.get('selected_plot_summary') or '（无）'}\n"
             f"二创覆盖：{json.dumps(state.get('canon_overrides') or [], ensure_ascii=False)[:3000]}"
         )
         return {
@@ -856,6 +863,8 @@ def create_app(
         state = _default_state(project_id)
         if req.instruction:
             state["instruction"] = req.instruction
+        if req.style_constraint is not None:
+            state["style_constraint"] = str(req.style_constraint).strip()
         if req.total_chapters is not None:
             state["total_chapters"] = int(req.total_chapters)
         if req.chapter_word_target is not None:
@@ -882,6 +891,7 @@ def create_app(
             "project_id": project_id,
             "nickname": state.get("nickname"),
             "instruction": state.get("instruction", ""),
+            "style_constraint": state.get("style_constraint", ""),
             "selected_plot_summary": state.get("selected_plot_summary", ""),
             "outline_structure": state.get("outline_structure", {"volumes": []}),
             "chapters": state.get("chapters", []),
@@ -919,10 +929,13 @@ def create_app(
         if nickname is not None:
             normalized = str(nickname).strip()
             state["nickname"] = normalized or None
+        if req.style_constraint is not None:
+            state["style_constraint"] = str(req.style_constraint).strip()
         save_state(project_id, state)
         return {
             "project_id": project_id,
             "nickname": state.get("nickname"),
+            "style_constraint": state.get("style_constraint", ""),
         }
 
     @app.delete("/projects/{project_id}")
@@ -1004,8 +1017,10 @@ def create_app(
             tp, tw = _tracked(state)
             logger.info("[生成大纲] start project=%s total_chapters=%s", project_id, state.get("total_chapters"))
             total = int(state.get("total_chapters") or DEFAULT_TOTAL_CHAPTERS)
-            initial_cnt = min(total, int(state.get("outline_initial_chapters") or OUTLINE_INITIAL_CHAPTERS))
-            await emit("plan_outline", f"正在生成初始大纲窗口（前 {initial_cnt} 章）…")
+            # 先生成“全书骨架”（标题+简述），随后再按窗口扩写细节要点。
+            # 这样可以保证用户在一开始就看到完整章节框架，同时保留扩窗的成本优势。
+            initial_cnt = total
+            await emit("plan_outline", f"正在生成全书大纲骨架（共 {initial_cnt} 章）…")
             kb_context = ""
             if state.get("kb_enabled") and state.get("selected_kb_ids"):
                 kb_context = await build_kb_context_for_outline(
@@ -1090,36 +1105,57 @@ def create_app(
             start_idx = i - 1
             extend_count = j - i + 1
             state["last_written_chapter_index"] = int(latest_chapter_index(state) or -1)
+            emit_project_event(
+                project_id,
+                event_name="generate_outline_window",
+                event_content=f"生成第{i}~{j}章窗口大纲",
+                status="start",
+            )
 
             tp, _tw = _tracked(state)
             await emit("outline_window", f"正在生成第 {i}~{j} 章大纲…")
-            kb_context = ""
-            if state.get("kb_enabled") and state.get("selected_kb_ids"):
-                kb_context = await build_kb_context_for_outline(
-                    kb_ids=list(state.get("selected_kb_ids") or []),
-                    plot_summary=str(state.get("selected_plot_summary") or ""),
-                    retriever=global_kb_retriever,
+            try:
+                kb_context = ""
+                if state.get("kb_enabled") and state.get("selected_kb_ids"):
+                    kb_context = await build_kb_context_for_outline(
+                        kb_ids=list(state.get("selected_kb_ids") or []),
+                        plot_summary=str(state.get("selected_plot_summary") or ""),
+                        retriever=global_kb_retriever,
+                    )
+                pack = _recent_fact_pack(state, start_idx)
+                ext_out = await outline_extend_window_node(
+                    state,
+                    llm=tp,
+                    on_progress=emit,
+                    kb_context=kb_context or None,
+                    recent_fact_pack=pack,
+                    start_chapter=start_idx,
+                    extend_count=extend_count,
                 )
-            pack = _recent_fact_pack(state, start_idx)
-            ext_out = await outline_extend_window_node(
-                state,
-                llm=tp,
-                on_progress=emit,
-                kb_context=kb_context or None,
-                recent_fact_pack=pack,
-                start_chapter=start_idx,
-                extend_count=extend_count,
+                state.update(ext_out)
+                fin_out = await outline_finalize_node(
+                    state,
+                    llm=tp,
+                    rag_indexer=rag_indexer,
+                    kb_context=kb_context or None,
+                )
+                state.update(fin_out)
+                await emit("persist", "正在保存更新后的大纲…")
+                save_state(project_id, state)
+            except Exception as exc:
+                emit_project_event(
+                    project_id,
+                    event_name="generate_outline_window",
+                    event_content=f"生成第{i}~{j}章窗口大纲失败：{_truncate_event_text(str(exc))}",
+                    status="error",
+                )
+                raise
+            emit_project_event(
+                project_id,
+                event_name="generate_outline_window",
+                event_content=f"生成第{i}~{j}章窗口大纲",
+                status="success",
             )
-            state.update(ext_out)
-            fin_out = await outline_finalize_node(
-                state,
-                llm=tp,
-                rag_indexer=rag_indexer,
-                kb_context=kb_context or None,
-            )
-            state.update(fin_out)
-            await emit("persist", "正在保存更新后的大纲…")
-            save_state(project_id, state)
             return {
                 "outline_structure": state.get("outline_structure", {"volumes": []}),
                 "outline": state.get("outline", ""),
@@ -1190,6 +1226,8 @@ def create_app(
                 state["chapter_word_target"] = int(req.chapter_word_target)
             if req.enable_chapter_illustrations is not None:
                 state["enable_chapter_illustrations"] = bool(req.enable_chapter_illustrations)
+            if req.style_constraint is not None:
+                state["style_constraint"] = str(req.style_constraint).strip()
 
             tp, tw = _tracked(state)
             tw_stream = None
@@ -1271,6 +1309,8 @@ def create_app(
                 state["chapter_word_target"] = int(req.chapter_word_target)
             if req.enable_chapter_illustrations is not None:
                 state["enable_chapter_illustrations"] = bool(req.enable_chapter_illustrations)
+            if req.style_constraint is not None:
+                state["style_constraint"] = str(req.style_constraint).strip()
 
             tp, tw = _tracked(state)
             tw_stream = None
@@ -1388,6 +1428,8 @@ def create_app(
             state["update_outline_on_feedback"] = bool(req.update_outline)
             if req.enable_chapter_illustrations is not None:
                 state["enable_chapter_illustrations"] = bool(req.enable_chapter_illustrations)
+            if req.style_constraint is not None:
+                state["style_constraint"] = str(req.style_constraint).strip()
 
             tp, tw = _tracked(state)
             tw_stream = None

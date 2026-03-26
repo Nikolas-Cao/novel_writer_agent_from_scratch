@@ -16,6 +16,80 @@ ProgressCallback = Optional[Callable[[str, str], Awaitable[None]]]
 OUTLINE_REPAIR_BACK_CHAPTERS = max(0, int(os.environ.get("OUTLINE_REPAIR_BACK_CHAPTERS", "3")))
 
 
+def _format_recent_fact_pack(recent_fact_pack: Optional[Dict[str, Any]]) -> str:
+    pack = recent_fact_pack or {}
+    summaries = str(pack.get("recent_summaries") or "（无）")
+    outline_pts = str(pack.get("recent_outline_points") or "（无）")
+    snapshot = str(pack.get("character_snapshot") or "（无）")
+    constraints = str(pack.get("story_constraints") or "（无）")
+    return (
+        "【recent_fact_pack】\n"
+        f"recent_summaries:\n{summaries}\n\n"
+        f"recent_outline_points:\n{outline_pts}\n\n"
+        f"character_snapshot:\n{snapshot}\n\n"
+        f"story_constraints:\n{constraints}"
+    )
+
+
+def _window_skeleton_rows(
+    outline_structure: Dict[str, Any],
+    start_index: int,
+    end_index: int,
+) -> str:
+    refs = po._flatten_chapter_refs(outline_structure)
+    rows: List[str] = []
+    for g in range(start_index, end_index + 1):
+        title = f"第{g + 1}章"
+        desc = ""
+        if g < len(refs):
+            ch = refs[g][2]
+            title = str(ch.get("title") or title).strip()
+            desc = str(ch.get("description") or ch.get("beat") or "").strip()
+        rows.append(f"- {g}|{title}|{desc or '（无）'}")
+    return "\n".join(rows) if rows else "（无）"
+
+
+def _extend_window_prompt(
+    selected_plot_summary: str,
+    total_chapters: int,
+    start_index: int,
+    end_index: int,
+    repair_start: int,
+    recent_fact_pack: Dict[str, Any],
+    window_skeleton_rows: str,
+    lo: int,
+    hi: int,
+    kb_suffix: str = "",
+) -> str:
+    repair_rule = (
+        f"可选回修区间：[{repair_start}, {start_index - 1}]，仅允许回修 points 与线索字段，不允许改 title。"
+        if repair_start <= start_index - 1
+        else "本次无需回修前序章节。"
+    )
+    return (
+        "你是一名长篇小说策划。【plan_outline_extend_window】请在既有剧情基础上，生成指定章节区间的大纲。\n"
+        "输出要求：\n"
+        f"1) 必须覆盖 global_index={start_index}..{end_index} 的所有章节；每章 points {lo}~{hi} 条；\n"
+        "2) 每条 point 控制在 30~60 字，避免过度铺陈；\n"
+        "3) 每章 points 总字数建议不超过 220 字；\n"
+        "4) 每条 point 只表达「1 个核心动作 + 1 个情绪/信息点」，避免并列堆砌多个事件；\n"
+        "5) 每章输出字段：global_index/title/description/beat/points/depends_on/carry_forward/new_threads/resolved_threads；\n"
+        "6) 请优先参考本轮提供的章节骨架（title+description）；可微调措辞但不要偏离章节意图；\n"
+        "7) depends_on 必须全部小于该章 global_index；\n"
+        f"8) {repair_rule}\n"
+        "9) 仅输出 JSON，不要解释。\n\n"
+        'JSON 格式：{"chapters":[{"global_index":20,"title":"...","description":"约20字章节简述","beat":"...","points":["..."],'
+        '"depends_on":[19],"carry_forward":["..."],"new_threads":[],"resolved_threads":[]}],'
+        '"repairs":[{"global_index":19,"points":["..."],"carry_forward":["..."],"new_threads":[],"resolved_threads":["..."]}]}\n\n'
+        f"全书目标章节数：{total_chapters}\n"
+        f"本次新增区间：{start_index}..{end_index}\n"
+        f"剧情概要：{selected_plot_summary}\n"
+        f"本轮章节骨架（global_index|title|description）：\n{window_skeleton_rows}\n\n"
+        f"{_format_recent_fact_pack(recent_fact_pack)}"
+        f"{kb_suffix}"
+    )
+
+
 def _merge_window_into_outline(
     outline_structure: Dict[str, Any],
     payload: Dict[str, List[Dict[str, Any]]],
@@ -35,6 +109,7 @@ def _merge_window_into_outline(
             src = (payload.get("chapters") or [])[g - start_index]
             dst = refs[g][2]
             dst["title"] = str(src.get("title") or dst.get("title") or f"第{g + 1}章")
+            dst["description"] = str(src.get("description") or dst.get("description") or "").strip()
             dst["beat"] = str(src.get("beat") or "")
             dst["points"] = list(src.get("points") or [])
             dst["depends_on"] = list(src.get("depends_on") or [])
@@ -48,6 +123,7 @@ def _merge_window_into_outline(
             outline_structure,
             {
                 "title": str(src.get("title") or f"第{g + 1}章"),
+                "description": str(src.get("description") or "").strip(),
                 "beat": str(src.get("beat") or ""),
                 "points": list(src.get("points") or []),
                 "depends_on": list(src.get("depends_on") or []),
@@ -141,13 +217,19 @@ async def outline_extend_window_node(
             "story_constraints": "（无）",
         }
 
-    prompt = po._extend_window_prompt(
+    window_skeleton_rows = _window_skeleton_rows(
+        outline_structure=outline_structure,
+        start_index=start,
+        end_index=end,
+    )
+    prompt = _extend_window_prompt(
         selected_plot_summary=selected_plot_summary,
         total_chapters=total_chapters,
         start_index=start,
         end_index=end,
         repair_start=repair_start,
         recent_fact_pack=recent_fact_pack or {},
+        window_skeleton_rows=window_skeleton_rows,
         lo=lo,
         hi=hi,
         kb_suffix=kb_suffix,

@@ -56,6 +56,14 @@ async def refine_chapter_node(
             f"【知识库摘要（节选）】\n{kb_a[:4000]}\n\n"
             f"【知识库证据（节选）】\n{kb_e[:4000]}\n\n"
         )
+    style_constraint = str(state.get("style_constraint") or "").strip()
+    style_constraint_block = ""
+    if style_constraint:
+        style_constraint_block = (
+            "【文风约束】\n"
+            f"{style_constraint}\n"
+            "请严格遵守上述文风约束，同时不得与既有剧情事实冲突。\n\n"
+        )
 
     prompt = (
         "你是小说编辑，请润色以下章节。\n"
@@ -66,6 +74,7 @@ async def refine_chapter_node(
         "4) 仅输出润色后的章节正文，禁止输出“核心亮点/说明/总结/点评”；\n"
         "5) 禁止输出 Markdown 代码围栏（不要出现 ```markdown 或 ```）。\n\n"
         f"{guard}"
+        f"{style_constraint_block}"
         f"{draft}"
     )
     t0 = time.monotonic()
@@ -97,7 +106,6 @@ async def refine_chapter_node(
         if int(item.get("index", -1)) == current_idx:
             item["path_or_content_ref"] = ref
             item["word_count"] = len(final_text.replace("\n", ""))
-            item["summary"] = final_text[:120]
 
     return {
         "current_chapter_final": final_text,

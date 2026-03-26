@@ -259,7 +259,3 @@ class KnowledgeBaseStore:
         p = self.assets_doc_path(kb_id, doc_id)
         p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def save_assets(self, kb_id: str, data: Dict[str, Any]) -> None:
-        self.ensure_kb_dir(kb_id)
-        p = self.assets_path(kb_id)
-        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")

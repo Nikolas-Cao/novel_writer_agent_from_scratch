@@ -143,7 +143,6 @@ async def insert_illustrations_into_chapter_node(
         if int(item.get("index", -1)) == current_idx:
             item["path_or_content_ref"] = ref
             item["images_refs"] = inserted_paths
-            item["summary"] = chapter_text[:120]
             item["word_count"] = len(chapter_text.replace("\n", ""))
 
     return {

@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +104,7 @@ def _normalize_skeleton_chapter_count(
         chs.append(
             {
                 "title": f"第{start_idx + j + 1}章",
-                "beat": "待模型补全结构时自动添加的占位节拍。",
+                "description": "（待补充章节简述）",
                 "points": ["（待扩写）"],
             }
         )
@@ -125,35 +125,6 @@ def _single_call_prompt(selected_plot_summary: str, total_chapters: int) -> str:
     )
 
 
-def _skeleton_prompt(selected_plot_summary: str, total_chapters: int) -> str:
-    return (
-        "你是一名长篇小说策划。【plan_outline_skeleton】请根据剧情概要生成全书结构骨架（不写每章详细要点）。\n"
-        "输出要求：\n"
-        "1) 至少一卷；章节总数必须等于目标章节数；\n"
-        "2) 每章仅含 title 与 beat（一句剧情走向/节拍，15~40 字）；不要写 points 或写空数组 []；\n"
-        "3) 仅输出 JSON，不要解释。\n"
-        "JSON 格式：\n"
-        '{"volumes":[{"volume_title":"卷名","chapters":[{"title":"章名","beat":"一句节拍"}]}]}\n\n'
-        f"目标章节数：{total_chapters}\n"
-        f"剧情概要：{selected_plot_summary}"
-    )
-
-
-def _ensure_placeholder_points(ch: Dict[str, Any]) -> None:
-    pts = ch.get("points")
-    if not isinstance(pts, list) or len(pts) == 0:
-        ch["points"] = ["（待扩写）"]
-
-
-def _prepare_skeleton_structure(obj: Dict[str, Any], total_chapters: int) -> Dict[str, Any]:
-    outline_structure: Dict[str, Any] = {"volumes": list(obj.get("volumes", []))}
-    _normalize_skeleton_chapter_count(outline_structure, total_chapters)
-    for _v, _c, ch in _flatten_chapter_refs(outline_structure):
-        _ensure_placeholder_points(ch)
-        ch.pop("one_liner", None)
-    return outline_structure
-
-
 def _batch_indices_line(indices: List[int]) -> str:
     return ",".join(str(i) for i in indices)
 
@@ -172,21 +143,6 @@ def _recent_outline_points_text(outline_structure: Dict[str, Any], end_index_inc
         pt_text = "；".join(str(p) for p in points[:3]) if points else "（无）"
         rows.append(f"- {g}: {title} | {pt_text}")
     return "\n".join(rows) if rows else "（无）"
-
-
-def _format_recent_fact_pack(recent_fact_pack: Optional[Dict[str, Any]]) -> str:
-    pack = recent_fact_pack or {}
-    summaries = str(pack.get("recent_summaries") or "（无）")
-    outline_pts = str(pack.get("recent_outline_points") or "（无）")
-    snapshot = str(pack.get("character_snapshot") or "（无）")
-    constraints = str(pack.get("story_constraints") or "（无）")
-    return (
-        "【recent_fact_pack】\n"
-        f"recent_summaries:\n{summaries}\n\n"
-        f"recent_outline_points:\n{outline_pts}\n\n"
-        f"character_snapshot:\n{snapshot}\n\n"
-        f"story_constraints:\n{constraints}"
-    )
 
 
 def _expand_batch_prompt(
@@ -216,44 +172,6 @@ def _expand_batch_prompt(
         "本批章节（global_index | 标题 | 节拍）：\n"
         f"{rows}\n"
         f"本批 global_index 列表：{_batch_indices_line(batch_global_indices)}"
-        f"{kb_suffix}"
-    )
-
-
-def _extend_window_prompt(
-    selected_plot_summary: str,
-    total_chapters: int,
-    start_index: int,
-    end_index: int,
-    repair_start: int,
-    recent_fact_pack: Dict[str, Any],
-    lo: int,
-    hi: int,
-    kb_suffix: str = "",
-) -> str:
-    repair_rule = (
-        f"可选回修区间：[{repair_start}, {start_index - 1}]，仅允许回修 points 与线索字段，不允许改 title。"
-        if repair_start <= start_index - 1
-        else "本次无需回修前序章节。"
-    )
-    return (
-        "你是一名长篇小说策划。【plan_outline_extend_window】请在既有剧情基础上，生成指定章节区间的大纲。\n"
-        "输出要求：\n"
-        f"1) 必须覆盖 global_index={start_index}..{end_index} 的所有章节；每章 points {lo}~{hi} 条；\n"
-        "2) 每条 point 控制在 30~60 字，避免过度铺陈；\n"
-        "3) 每章 points 总字数建议不超过 220 字；\n"
-        "4) 每条 point 只表达「1 个核心动作 + 1 个情绪/信息点」，避免并列堆砌多个事件；\n"
-        "5) 每章输出字段：global_index/title/beat/points/depends_on/carry_forward/new_threads/resolved_threads；\n"
-        "6) depends_on 必须全部小于该章 global_index；\n"
-        f"7) {repair_rule}\n"
-        "8) 仅输出 JSON，不要解释。\n\n"
-        'JSON 格式：{"chapters":[{"global_index":20,"title":"...","beat":"...","points":["..."],'
-        '"depends_on":[19],"carry_forward":["..."],"new_threads":[],"resolved_threads":[]}],'
-        '"repairs":[{"global_index":19,"points":["..."],"carry_forward":["..."],"new_threads":[],"resolved_threads":["..."]}]}\n\n'
-        f"全书目标章节数：{total_chapters}\n"
-        f"本次新增区间：{start_index}..{end_index}\n"
-        f"剧情概要：{selected_plot_summary}\n\n"
-        f"{_format_recent_fact_pack(recent_fact_pack)}"
         f"{kb_suffix}"
     )
 
@@ -289,6 +207,7 @@ def _validate_extend_payload(
         by_idx[g] = {
             "global_index": g,
             "title": str(item.get("title") or f"第{g + 1}章").strip(),
+            "description": str(item.get("description") or "").strip(),
             "beat": str(item.get("beat") or "").strip(),
             "points": [str(p).strip() for p in points if str(p).strip()],
             "depends_on": depends_on,
@@ -335,199 +254,6 @@ def _append_chapter_to_tail(outline_structure: Dict[str, Any], chapter: Dict[str
     chs = last.setdefault("chapters", [])
     chs.append(chapter)
     return len(vols) - 1, len(chs) - 1
-
-
-def merge_outline_append_only(
-    existing_outline: Dict[str, Any],
-    extend_payload: Dict[str, List[Dict[str, Any]]],
-    start_index: int,
-) -> Set[int]:
-    refs = _flatten_chapter_refs(existing_outline)
-    current_count = len(refs)
-    affected: Set[int] = set()
-
-    # 先处理回修（只允许 points 与线索字段）
-    for rp in extend_payload.get("repairs") or []:
-        idx = int(rp.get("global_index", -1))
-        if idx < 0 or idx >= current_count:
-            continue
-        target = refs[idx][2]
-        target["points"] = list(rp.get("points") or [])
-        target["carry_forward"] = list(rp.get("carry_forward") or [])
-        target["new_threads"] = list(rp.get("new_threads") or [])
-        target["resolved_threads"] = list(rp.get("resolved_threads") or [])
-        affected.add(idx)
-
-    for ch in extend_payload.get("chapters") or []:
-        idx = int(ch.get("global_index", -1))
-        if idx < start_index:
-            continue
-        if idx < current_count:
-            # append-only: 不回改已有章节标题/节拍
-            continue
-        while current_count < idx:
-            placeholder = {
-                "title": f"第{current_count + 1}章",
-                "beat": "占位章节，待后续扩窗补全。",
-                "points": ["（占位）"],
-                "depends_on": [max(0, current_count - 1)] if current_count > 0 else [],
-                "carry_forward": [],
-                "new_threads": [],
-                "resolved_threads": [],
-            }
-            _append_chapter_to_tail(existing_outline, placeholder)
-            affected.add(current_count)
-            current_count += 1
-        new_ch = {
-            "title": str(ch.get("title") or f"第{idx + 1}章"),
-            "beat": str(ch.get("beat") or ""),
-            "points": list(ch.get("points") or []),
-            "depends_on": list(ch.get("depends_on") or []),
-            "carry_forward": list(ch.get("carry_forward") or []),
-            "new_threads": list(ch.get("new_threads") or []),
-            "resolved_threads": list(ch.get("resolved_threads") or []),
-        }
-        _append_chapter_to_tail(existing_outline, new_ch)
-        affected.add(idx)
-        current_count += 1
-    return affected
-
-
-def _parse_expand_batch(
-    data: Dict[str, Any], expected_indices: List[int]
-) -> Dict[int, List[str]]:
-    out: Dict[int, List[str]] = {}
-    for item in data.get("chapters") or []:
-        if not isinstance(item, dict):
-            continue
-        try:
-            g = int(item.get("global_index", -1))
-        except (TypeError, ValueError):
-            continue
-        pts = item.get("points")
-        if isinstance(pts, list) and pts:
-            out[g] = [str(p).strip() for p in pts if str(p).strip()]
-    missing = [i for i in expected_indices if i not in out or not out[i]]
-    if missing:
-        raise ValueError(f"expand_batch missing chapters: {missing}")
-    return out
-
-
-def _carry_forward_from_points(points: List[str]) -> str:
-    if not points:
-        return ""
-    tail = points[-3:]
-    return "；".join(tail)[:800]
-
-
-def _fallback_points_from_chapter(ch: Dict[str, Any], min_len: int) -> List[str]:
-    beat = (ch.get("beat") or ch.get("one_liner") or "").strip()
-    title = (ch.get("title") or "").strip()
-    if beat:
-        return [beat] if min_len <= 1 else [beat, f"围绕「{title or '本章'}」推进情节。"]
-    return [f"围绕「{title or '本章'}」展开剧情。"]
-
-
-async def _expand_batches(
-    planner: Any,
-    selected_plot_summary: str,
-    total_chapters: int,
-    outline_structure: Dict[str, Any],
-    project_id: str,
-    on_progress: ProgressCallback,
-    lo: int,
-    hi: int,
-    kb_suffix: str = "",
-) -> None:
-    t_expand_all = time.monotonic()
-    refs = _flatten_chapter_refs(outline_structure)
-    batch_size = PLAN_OUTLINE_BATCH_SIZE
-    prev_carry = ""
-
-    for start in range(0, len(refs), batch_size):
-        t_batch = time.monotonic()
-        batch = refs[start : start + batch_size]
-        indices = [start + k for k in range(len(batch))]
-        t_build_prompt = time.monotonic()
-        chapter_rows = []
-        for k, (_vi, _ci, ch) in enumerate(batch):
-            g = indices[k]
-            title = (ch.get("title") or f"第{g + 1}章").strip()
-            beat = (ch.get("beat") or "").strip()
-            chapter_rows.append(f"{g}|{title}|{beat}")
-        prompt = _expand_batch_prompt(
-            selected_plot_summary,
-            total_chapters,
-            indices,
-            chapter_rows,
-            prev_carry,
-            lo,
-            hi,
-            kb_suffix,
-        )
-        prompt_elapsed = time.monotonic() - t_build_prompt
-        logger.info(
-            "[plan_outline] expand_batch project=%s range=%s..%s prompt_build_s=%.3f",
-            project_id,
-            indices[0],
-            indices[-1],
-            prompt_elapsed,
-        )
-        if on_progress:
-            await on_progress(
-                "plan_outline",
-                f"正在扩写大纲要点 {indices[-1] + 1}/{len(refs)} 章（本批 {len(indices)} 章）…",
-            )
-        try:
-            t_llm = time.monotonic()
-            data = await invoke_and_parse_with_retry(
-                planner, prompt, extract_json_object, max_retries=3
-            )
-            llm_elapsed = time.monotonic() - t_llm
-            t_parse = time.monotonic()
-            by_idx = _parse_expand_batch(data, indices)
-            parse_elapsed = time.monotonic() - t_parse
-        except Exception as exc:
-            logger.warning("[plan_outline] expand_batch failed, using fallback: %s", exc)
-            by_idx = {}
-            t_fallback = time.monotonic()
-            for g, (_vi, _ci, ch) in zip(indices, batch):
-                by_idx[g] = _fallback_points_from_chapter(ch, lo)
-            llm_elapsed = 0.0
-            parse_elapsed = 0.0
-            logger.info(
-                "[plan_outline] expand_batch_fallback project=%s range=%s..%s fallback_s=%.3f",
-                project_id,
-                indices[0],
-                indices[-1],
-                time.monotonic() - t_fallback,
-            )
-
-        t_apply = time.monotonic()
-        for g, (_vi, _ci, ch) in zip(indices, batch):
-            pts = by_idx.get(g) or _fallback_points_from_chapter(ch, lo)
-            ch["points"] = pts
-        apply_elapsed = time.monotonic() - t_apply
-
-        last_g = indices[-1]
-        last_ch = batch[-1][2]
-        prev_carry = _carry_forward_from_points(last_ch.get("points") or [])
-        logger.info(
-            "[plan_outline] expand_batch_done project=%s range=%s..%s llm_s=%.3f parse_s=%.3f apply_s=%.3f batch_total_s=%.3f",
-            project_id,
-            indices[0],
-            last_g,
-            llm_elapsed,
-            parse_elapsed,
-            apply_elapsed,
-            time.monotonic() - t_batch,
-        )
-    logger.info(
-        "[plan_outline] expand_batches_done project=%s batches=%s total_s=%.3f",
-        project_id,
-        (len(refs) + batch_size - 1) // batch_size if batch_size > 0 else 0,
-        time.monotonic() - t_expand_all,
-    )
 
 
 async def _extract_canon_overrides(

@@ -204,7 +204,162 @@ test.describe("生成概要 / 项目创建交互", () => {
   });
 });
 
+test.describe("文风约束弹窗与持久化", () => {
+  test("可保存文风约束并在重新打开项目后回显", async ({ page }) => {
+    const pid = "p-style-constraint";
+    let savedStyleConstraint = "初始文风";
+    let patchCount = 0;
+    await page.route("**/projects**", async (route) => {
+      const req = route.request();
+      const url = new URL(req.url());
+      const path = url.pathname.replace(/\/$/, "") || "/";
+      const method = req.method();
+
+      if (method === "GET" && path === "/projects") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            projects: [{ project_id: pid, created_at: 1700000000 }],
+          }),
+        });
+        return;
+      }
+
+      if (method === "GET" && path === `/projects/${pid}`) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            project_id: pid,
+            instruction: "stub",
+            style_constraint: savedStyleConstraint,
+            selected_plot_summary: "stub",
+            outline_structure: {
+              volumes: [{ volume_title: "第一卷", chapters: [{ title: "第一章", points: ["p1"] }] }],
+            },
+            chapters: [],
+            current_chapter_index: 0,
+            total_chapters: 2,
+            chapter_word_target: 1200,
+            enable_chapter_illustrations: false,
+            created_at: 1700000000,
+            token_usage: {},
+            selected_kb_ids: [],
+            kb_enabled: false,
+            canon_overrides: [],
+          }),
+        });
+        return;
+      }
+
+      if (method === "PATCH" && path === `/projects/${pid}`) {
+        patchCount += 1;
+        const body = req.postDataJSON() as { style_constraint?: string };
+        savedStyleConstraint = String(body.style_constraint || "");
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            project_id: pid,
+            nickname: null,
+            style_constraint: savedStyleConstraint,
+          }),
+        });
+        return;
+      }
+
+      await route.continue();
+    });
+
+    await page.goto("/");
+    await page.locator(`.project-open-btn[data-project-id="${pid}"]`).click();
+    await expect(page.locator("#global-status")).toContainText(`已打开 ${pid}`);
+    await expect(page.locator("#btn-style-constraint")).toBeVisible();
+
+    await page.locator("#btn-style-constraint").click();
+    await expect(page.locator("#style-constraint-modal")).toBeVisible();
+    await page.locator("#style-constraint-input").fill("黑色电影感，句式短促。");
+    await page.locator("#btn-style-constraint-save").click();
+    await expect(page.locator("#global-status")).toContainText("文风约束已保存");
+    expect(patchCount).toBe(1);
+
+    await page.goto("/");
+    await page.locator(`.project-open-btn[data-project-id="${pid}"]`).click();
+    await page.locator("#btn-style-constraint").click();
+    await expect(page.locator("#style-constraint-input")).toHaveValue("黑色电影感，句式短促。");
+  });
+});
+
 test.describe("UI regressions from past chats", () => {
+  test("大纲章节标题应显示连续编号前缀（1、2、3）", async ({ page }) => {
+    const pid = "p-outline-numbering";
+    await page.route("**/projects**", async (route) => {
+      const req = route.request();
+      const url = new URL(req.url());
+      const method = req.method();
+      const path = url.pathname.replace(/\/$/, "") || "/";
+
+      if (method === "GET" && path === "/projects") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            projects: [{ project_id: pid, created_at: 1700000000 }],
+          }),
+        });
+        return;
+      }
+
+      if (method === "GET" && path === `/projects/${pid}`) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            project_id: pid,
+            instruction: "stub",
+            selected_plot_summary: "stub",
+            outline_structure: {
+              volumes: [
+                {
+                  volume_title: "第一卷",
+                  chapters: [
+                    { title: "系统觉醒", description: "d1", points: ["p1"] },
+                    { title: "初战告捷", description: "d2", points: ["p2"] },
+                  ],
+                },
+                {
+                  volume_title: "第二卷",
+                  chapters: [{ title: "暗流涌动", description: "d3", points: ["p3"] }],
+                },
+              ],
+            },
+            chapters: [],
+            current_chapter_index: 0,
+            total_chapters: 200,
+            chapter_word_target: 3000,
+            enable_chapter_illustrations: false,
+            created_at: 1700000000,
+            token_usage: {},
+          }),
+        });
+        return;
+      }
+
+      await route.continue();
+    });
+
+    await page.goto("/");
+    await page.locator(`.project-open-btn[data-project-id="${pid}"]`).click();
+    await expect(page.locator("#global-status")).toContainText(`已打开 ${pid}`);
+
+    const outlineTitles = page.locator("#outline-view .outline-chapter strong");
+    await expect(outlineTitles).toHaveCount(3);
+    await expect(outlineTitles.nth(0)).toHaveText("1、系统觉醒");
+    await expect(outlineTitles.nth(1)).toHaveText("2、初战告捷");
+    await expect(outlineTitles.nth(2)).toHaveText("3、暗流涌动");
+  });
+
 
   test("选择非最新章节时：隐藏续写/重写/重生成，显示回滚；选择最新章节时：隐藏回滚", async ({ page, request }) => {
     const picked = await findProjectWithMinChapters(request, 2);

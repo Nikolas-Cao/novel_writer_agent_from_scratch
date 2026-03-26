@@ -161,6 +161,15 @@ async def write_chapter_node(
     elif overrides_block.strip():
         kb_block = f"\n\n{overrides_block}"
 
+    style_constraint = str(state.get("style_constraint") or "").strip()
+    style_constraint_block = ""
+    if style_constraint:
+        style_constraint_block = (
+            "【文风约束】\n"
+            f"{style_constraint}\n"
+            "请严格遵守上述文风约束，同时不得与既有剧情事实冲突。\n\n"
+        )
+
     prompt = (
         "请根据以下章节信息撰写小说正文。\n"
         "要求：\n"
@@ -170,6 +179,7 @@ async def write_chapter_node(
         "4) 本阶段只写当前章，不总结后续剧情；\n"
         "5) 仅输出小说章节正文本身，禁止输出“核心亮点/写作思路/总结/点评/说明”；\n"
         "6) 禁止输出 Markdown 代码围栏（不要出现 ```markdown 或 ```）。\n\n"
+        f"{style_constraint_block}"
         f"章节标题：{title}\n"
         f"目标字数：约{word_target}字\n"
         f"章节要点：\n{points_text}\n\n"
@@ -200,7 +210,7 @@ async def write_chapter_node(
     chapter_meta: ChapterMeta = {
         "chapter_id": str(uuid.uuid4()),
         "title": title,
-        "summary": draft[:120],
+        "summary": "",
         "path_or_content_ref": ref,
         "word_count": word_count,
         "index": current_idx,

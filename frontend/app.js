@@ -493,6 +493,7 @@ const state = {
   contextMenuProjectId: null,
   pendingDeleteProjectId: null,
   expandedEventIndex: null,
+  styleConstraint: "",
 };
 
 const el = {
@@ -520,9 +521,15 @@ const el = {
   characterGraphModalContent: document.getElementById("character-graph-modal-content"),
   eventLogModal: document.getElementById("event-log-modal"),
   eventLogModalContent: document.getElementById("event-log-modal-content"),
+  styleConstraintModal: document.getElementById("style-constraint-modal"),
+  styleConstraintInput: document.getElementById("style-constraint-input"),
   btnViewChapterModal: document.getElementById("btn-view-chapter-modal"),
   btnViewCharacterGraphModal: document.getElementById("btn-view-character-graph-modal"),
   btnViewEventLogs: document.getElementById("btn-view-event-logs"),
+  btnStyleConstraint: document.getElementById("btn-style-constraint"),
+  btnStyleConstraintSave: document.getElementById("btn-style-constraint-save"),
+  btnStyleConstraintCancel: document.getElementById("btn-style-constraint-cancel"),
+  btnCloseStyleConstraintModal: document.getElementById("btn-close-style-constraint-modal"),
   btnCloseChapterModal: document.getElementById("btn-close-chapter-modal"),
   btnCloseCharacterGraphModal: document.getElementById("btn-close-character-graph-modal"),
   btnCloseEventLogModal: document.getElementById("btn-close-event-log-modal"),
@@ -644,12 +651,6 @@ function isLatestChapterSelected() {
   if (!Array.isArray(state.chapterMetas) || state.chapterMetas.length === 0) return false;
   const latest = state.chapterMetas.reduce((max, item) => Math.max(max, Number(item.index)), -1);
   return Number(state.selectedChapterIndex) === Number(latest);
-}
-
-function setChapterWriteButtonsDisabled(disabled) {
-  if (el.btnNextChapter) el.btnNextChapter.disabled = disabled;
-  if (el.btnRegenerateChapter) el.btnRegenerateChapter.disabled = disabled;
-  if (el.btnRewrite) el.btnRewrite.disabled = disabled;
 }
 
 function updateChapterActionButtons() {
@@ -971,11 +972,32 @@ function illustrationFlagForApi() {
   return Boolean(el.enableChapterIllustrations && el.enableChapterIllustrations.checked);
 }
 
+function syncSummarySourceState() {
+  const custom = String((el.customSummary && el.customSummary.value) || "").trim();
+  const hasCustomSummary = custom.length > 0;
+  if (hasCustomSummary && state.selectedIdea) {
+    state.selectedIdea = "";
+  }
+  const hasSelectedIdea = String(state.selectedIdea || "").trim().length > 0;
+  const hasOutlineSource = hasCustomSummary || hasSelectedIdea;
+  if (el.btnGenerateIdeas) {
+    // 自定义概要与候选概要必须二选一；有自定义输入时禁用“生成概要”避免语义冲突。
+    el.btnGenerateIdeas.disabled = state.isGeneratingOutline || hasCustomSummary;
+  }
+  if (el.btnGenerateOutline) {
+    // 没有任何可用概要来源时，禁止触发“生成大纲”。
+    el.btnGenerateOutline.disabled = state.isGeneratingOutline || !hasOutlineSource;
+  }
+  if (!hasCustomSummary && !state.selectedIdea && Array.isArray(state.plotIdeas) && state.plotIdeas.length > 0) {
+    state.selectedIdea = state.plotIdeas[0];
+  }
+  renderPlotIdeas(state.plotIdeas);
+}
+
 function setOutlineGeneratingUI(isGenerating) {
   state.isGeneratingOutline = Boolean(isGenerating);
   const lockTargets = [
     el.instruction,
-    el.btnGenerateIdeas,
     el.customSummary,
     el.btnGenerateOutline,
   ];
@@ -985,6 +1007,7 @@ function setOutlineGeneratingUI(isGenerating) {
   if (el.plotIdeas) {
     el.plotIdeas.classList.toggle("is-disabled", state.isGeneratingOutline);
   }
+  syncSummarySourceState();
 }
 
 function renderProjectList(projectIds) {
@@ -1191,6 +1214,7 @@ async function openProject(projectId) {
     state.totalChapters = Number.isFinite(Number(p.total_chapters))
       ? Number(p.total_chapters)
       : 0;
+    state.styleConstraint = String((p && p.style_constraint) || "").trim();
     updateOutlineWindowRangeHint();
     await loadKnowledgeBases();
     const kbPart =
@@ -1204,6 +1228,7 @@ async function openProject(projectId) {
     renderTokenUsage(p);
     renderOutline(p.outline_structure);
     renderChapterList(chapters);
+    syncSummarySourceState();
     adjustChapterViewHeight();
     if (generatedCount > 0 && resolvedCurrentIndex !== null) {
       await openChapter(resolvedCurrentIndex);
@@ -1222,11 +1247,13 @@ async function openProject(projectId) {
     state.outlineGeneratedUntil = -1;
     state.outlineWindowSize = 10;
     state.totalChapters = 0;
+    state.styleConstraint = "";
     updateOutlineWindowRangeHint();
     if (el.tokenUsage) el.tokenUsage.innerHTML = "";
     updateCreatePanelVisibility(null);
     updateDetailLayout(null);
     setDetailPanelVisibility(false);
+    syncSummarySourceState();
     setStatus(`打开失败：${e.message}`);
     void loadKnowledgeBases();
   }
@@ -1350,6 +1377,8 @@ function startNewProject() {
   updateDetailLayout(null);
   setDetailPanelVisibility(false);
   setPlotIdeasSectionVisibility(false);
+  if (el.customSummary) el.customSummary.value = "";
+  syncSummarySourceState();
   setStatus("请输入创作意图后，点击「生成概要」（或先「新建项目」再生成）");
   if (el.instruction) el.instruction.focus();
   void loadKnowledgeBases();
@@ -1364,8 +1393,9 @@ function renderPlotIdeas(ideas) {
   ) {
     state.expandedIdeaIndex = null;
   }
-  // 默认选中第一条，确保有明确可选结果
-  if (!state.selectedIdea && state.plotIdeas.length > 0) {
+  const hasCustomSummary = String((el.customSummary && el.customSummary.value) || "").trim().length > 0;
+  // 仅在没有自定义概要时默认选中第一条，确保来源唯一。
+  if (!hasCustomSummary && !state.selectedIdea && state.plotIdeas.length > 0) {
     state.selectedIdea = state.plotIdeas[0];
   }
 
@@ -1433,12 +1463,16 @@ function renderOutline(outlineStructure) {
     (v.chapters || []).forEach((c, ci) => {
       const isCurrent = state.currentChapterIndex !== null && chapterSeq === state.currentChapterIndex;
       const chapterCls = isCurrent ? "outline-chapter is-current" : "outline-chapter";
+      const chapterOrderLabel = `${chapterSeq + 1}、`;
       chunks.push(
         `<div class="${chapterCls}" data-chapter-index="${chapterSeq}"><strong>${escapeHtml(
-          c.title || `第${ci + 1}章`
+          `${chapterOrderLabel}${c.title || `第${ci + 1}章`}`
         )}</strong></div>`
       );
       chunks.push("<ul>");
+      if ((c.description || "").trim()) {
+        chunks.push(`<li class="outline-desc">${escapeHtml(c.description)}</li>`);
+      }
       (c.points || []).forEach((p) => chunks.push(`<li>${escapeHtml(p)}</li>`));
       chunks.push("</ul>");
       chapterSeq += 1;
@@ -1639,6 +1673,44 @@ function closeEventLogModal() {
   el.eventLogModal.hidden = true;
 }
 
+function openStyleConstraintModal() {
+  if (!el.styleConstraintModal) return;
+  if (!state.currentProjectId) {
+    setStatus("请先创建或打开项目");
+    return;
+  }
+  if (el.styleConstraintInput) {
+    el.styleConstraintInput.value = state.styleConstraint || "";
+  }
+  el.styleConstraintModal.hidden = false;
+  window.setTimeout(() => {
+    if (el.styleConstraintInput) el.styleConstraintInput.focus();
+  }, 0);
+}
+
+function closeStyleConstraintModal() {
+  if (!el.styleConstraintModal) return;
+  el.styleConstraintModal.hidden = true;
+}
+
+async function saveStyleConstraint() {
+  if (!state.currentProjectId) {
+    setStatus("请先创建或打开项目");
+    return;
+  }
+  const nextValue = String((el.styleConstraintInput && el.styleConstraintInput.value) || "").trim();
+  try {
+    await api.patch(`/projects/${state.currentProjectId}`, {
+      style_constraint: nextValue,
+    });
+    state.styleConstraint = nextValue;
+    closeStyleConstraintModal();
+    setStatus(nextValue ? "文风约束已保存" : "已清空文风约束");
+  } catch (e) {
+    setStatus(`保存文风约束失败：${e.message}`);
+  }
+}
+
 /**
  * 生成/刷新剧情概要：已有当前项目时复用该项目，仅调用 plot-ideas；无项目时才 POST /projects 创建。
  * 结束后刷新列表与预览（loadProjects + openProject）。
@@ -1695,12 +1767,12 @@ async function generateIdeas() {
     setStatus(`操作失败：${e.message}`);
   } finally {
     if (btn) {
-      btn.disabled = false;
       btn.textContent = origText;
     }
     if (el.btnGenerateOutline) {
       el.btnGenerateOutline.disabled = state.isGeneratingOutline;
     }
+    syncSummarySourceState();
   }
 }
 
@@ -1709,19 +1781,33 @@ async function generateOutline() {
     setStatus("大纲生成中，请稍候...");
     return;
   }
-  if (!state.currentProjectId) {
-    setStatus("请先创建或打开项目");
-    return;
-  }
   const custom = el.customSummary.value.trim();
   const selected = custom || state.selectedIdea;
   if (!selected) {
     setStatus("请先选择一条剧情概要，或填写自定义概要");
     return;
   }
-  setStatus("生成大纲中...");
   setOutlineGeneratingUI(true);
   try {
+    if (!state.currentProjectId) {
+      setStatus("正在创建项目...");
+      const instruction = String((el.instruction && el.instruction.value) || "").trim();
+      const totalChapters = parseTotalChaptersInput();
+      const selectedKbIds = getSelectedKbIdsFromUi();
+      const p = await api.post("/projects", {
+        instruction,
+        ...(totalChapters ? { total_chapters: totalChapters } : {}),
+        ...(selectedKbIds.length ? { selected_kb_ids: selectedKbIds } : {}),
+      });
+      const pid = p && p.project_id;
+      if (!pid) {
+        setStatus("操作失败：服务器未返回项目 ID");
+        return;
+      }
+      state.currentProjectId = pid;
+      await loadProjects();
+    }
+    setStatus("生成大纲中...");
     const totalChapters = parseTotalChaptersInput();
     const data = await postNdjsonStream(
       `/projects/${state.currentProjectId}/outline`,
@@ -1758,7 +1844,10 @@ async function writeNextChapter() {
     }
     const data = await postNdjsonStream(
       `/projects/${state.currentProjectId}/chapters/next`,
-      { enable_chapter_illustrations: illustrationFlagForApi() },
+      {
+        enable_chapter_illustrations: illustrationFlagForApi(),
+        style_constraint: String(state.styleConstraint || "").trim(),
+      },
       onProgress
     );
     flushNow();
@@ -1847,6 +1936,7 @@ async function rewriteChapter() {
         user_feedback: feedback,
         update_outline: shouldUpdateOutline,
         enable_chapter_illustrations: illustrationFlagForApi(),
+        style_constraint: String(state.styleConstraint || "").trim(),
       },
       onProgress
     );
@@ -1963,6 +2053,10 @@ function bindEvents() {
   bindClick(el.btnViewChapterModal, openChapterModal);
   bindClick(el.btnViewCharacterGraphModal, openCharacterGraphModal);
   bindClick(el.btnViewEventLogs, openEventLogModal);
+  bindClick(el.btnStyleConstraint, openStyleConstraintModal);
+  bindClick(el.btnStyleConstraintSave, saveStyleConstraint);
+  bindClick(el.btnStyleConstraintCancel, closeStyleConstraintModal);
+  bindClick(el.btnCloseStyleConstraintModal, closeStyleConstraintModal);
   bindClick(el.btnCloseChapterModal, closeChapterModal);
   bindClick(el.btnCloseCharacterGraphModal, closeCharacterGraphModal);
   bindClick(el.btnCloseEventLogModal, closeEventLogModal);
@@ -1988,6 +2082,11 @@ function bindEvents() {
       } else if (action === "delete") {
         openDeleteModal(projectId);
       }
+    });
+  }
+  if (el.customSummary) {
+    el.customSummary.addEventListener("input", () => {
+      syncSummarySourceState();
     });
   }
 
@@ -2024,6 +2123,13 @@ function bindEvents() {
       }
     });
   }
+  if (el.styleConstraintModal) {
+    el.styleConstraintModal.addEventListener("click", (event) => {
+      if (event.target && event.target.getAttribute("data-close-style-constraint") === "true") {
+        closeStyleConstraintModal();
+      }
+    });
+  }
   if (el.projectRenameModal) {
     el.projectRenameModal.addEventListener("click", (event) => {
       if (event.target && event.target.getAttribute("data-close-rename") === "true") {
@@ -2052,6 +2158,7 @@ function bindEvents() {
       closeCharacterGraphModal();
       closeEventLogModal();
       closeFeedbackRewriteModal();
+      closeStyleConstraintModal();
       closeProjectContextMenu();
       closeRenameModal();
       closeDeleteModal();
@@ -2075,6 +2182,7 @@ if (document.readyState === "loading") {
     bindEvents();
     void loadProjects();
     void loadKnowledgeBases();
+    syncSummarySourceState();
     adjustChapterViewHeight();
   });
 } else {
@@ -2082,5 +2190,6 @@ if (document.readyState === "loading") {
   bindEvents();
   void loadProjects();
   void loadKnowledgeBases();
+  syncSummarySourceState();
   adjustChapterViewHeight();
 }

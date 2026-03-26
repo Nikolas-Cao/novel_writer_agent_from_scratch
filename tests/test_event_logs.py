@@ -127,3 +127,39 @@ def test_event_logs_filter_by_chapter():
     assert len(all_events) >= len(chapter_events)
     assert chapter_events, "应能筛到章节事件"
     assert all(int(e.get("chapter_index")) == 0 for e in chapter_events)
+
+
+def test_outline_window_event_logs():
+    from server import create_app
+
+    root = _tmp_root()
+    app = create_app(
+        planner_llm=_PlannerLLM(),
+        writer_llm=_WriterLLM(),
+        projects_root=root / "projects",
+        vector_root=root / "vector",
+        checkpoint_root=root / "states",
+    )
+    client = TestClient(app)
+
+    create_resp = client.post("/projects", json={"instruction": "测试", "total_chapters": 20})
+    assert create_resp.status_code == 200
+    pid = create_resp.json()["project_id"]
+
+    ideas = client.post(f"/projects/{pid}/plot-ideas", json={"instruction": "都市悬疑"}).json()["plot_ideas"]
+    outline_resp = client.post(
+        f"/projects/{pid}/outline",
+        json={"selected_plot_summary": ideas[0], "total_chapters": 20},
+    )
+    assert outline_resp.status_code == 200
+
+    # 默认初始窗口为 10 章，扩窗一次应触发 11~20 章。
+    window_resp = client.post(f"/projects/{pid}/outline/window", json={})
+    assert window_resp.status_code == 200
+
+    events = client.get(f"/projects/{pid}/events").json().get("events") or []
+    window_events = [e for e in events if e.get("event_name") == "generate_outline_window"]
+    assert window_events, "扩窗应记录 generate_outline_window 事件"
+    statuses = {str(e.get("status")) for e in window_events}
+    assert "start" in statuses
+    assert "success" in statuses

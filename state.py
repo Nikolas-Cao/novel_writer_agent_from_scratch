@@ -95,6 +95,7 @@ class CharacterGraph(TypedDict):
 class NovelProjectState(TypedDict, total=False):
     """长篇创作 Agent 的 LangGraph 状态"""
     instruction: str
+    style_constraint: str
     plot_ideas: List[str]
     selected_plot_summary: str
     outline: str

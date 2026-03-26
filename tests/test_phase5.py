@@ -28,11 +28,19 @@ class _Resp:
         self.content = content
 
 
-def _fake_skeleton_volumes(n: int) -> str:
+def _fake_skeleton_batch(prompt: str) -> str:
+    m = re.search(r"本批区间[：:]\s*(\d+)\.\.(\d+)", prompt)
+    s = int(m.group(1)) if m else 0
+    e = int(m.group(2)) if m else s
     chapters = [
-        {"title": f"第{i + 1}章", "beat": f"第{i + 1}章核心推进", "points": []} for i in range(n)
+        {
+            "global_index": i,
+            "title": f"第{i + 1}章",
+            "description": f"第{i + 1}章约20字简述",
+        }
+        for i in range(s, e + 1)
     ]
-    return json.dumps({"volumes": [{"volume_title": "第一卷", "chapters": chapters}]}, ensure_ascii=False)
+    return json.dumps({"chapters": chapters}, ensure_ascii=False)
 
 
 def _fake_expand_batch(prompt: str) -> str:
@@ -60,6 +68,7 @@ def _fake_extend_window(prompt: str) -> str:
             {
                 "global_index": g,
                 "title": f"第{g + 1}章",
+                "description": f"第{g + 1}章约20字简述",
                 "beat": f"延展节拍{g}",
                 "points": [f"wA-{g}", f"wB-{g}", f"wC-{g}"],
                 "depends_on": [g - 1] if g > 0 else [],
@@ -83,9 +92,7 @@ class ApiPlannerLLM:
         if "【plan_outline_expand_batch】" in prompt:
             return _Resp(_fake_expand_batch(prompt))
         if "【plan_outline_skeleton_lite】" in prompt or "【plan_outline_skeleton】" in prompt:
-            m = re.search(r"目标章节数[：:]\s*(\d+)", prompt)
-            n = int(m.group(1)) if m else 12
-            return _Resp(_fake_skeleton_volumes(n))
+            return _Resp(_fake_skeleton_batch(prompt))
         if "【plan_outline_single】" in prompt and '"volumes"' in prompt:
             return _Resp(
                 '{"volumes":[{"volume_title":"第一卷","chapters":[{"title":"第一章 雨夜","points":["案件发生","主角入局"]},{"title":"第二章 追踪","points":["线索扩展","对手现身"]}]}]}'
@@ -233,7 +240,7 @@ def test_phase5_outline_multi_phase_api():
             checkpoint_root=root / "states",
         )
         client = TestClient(app)
-        n = 23
+        n = 200
         r = client.post("/projects", json={"instruction": "长篇 API", "total_chapters": n})
         assert r.status_code == 200
         pid = r.json()["project_id"]
@@ -247,7 +254,7 @@ def test_phase5_outline_multi_phase_api():
         assert r.status_code == 200
         vols = r.json()["outline_structure"]["volumes"]
         total = sum(len(v.get("chapters") or []) for v in vols)
-        assert total == 20
+        assert total == n
 
         # 写到第 21 章时触发自动扩窗
         for i in range(21):
@@ -312,10 +319,70 @@ def test_phase5_extend_failure_not_persisted():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_style_constraint_persist_and_apply_in_api():
+    from server import create_app
+
+    class CaptureWriterLLM(ApiWriterLLM):
+        def __init__(self) -> None:
+            self.prompts = []
+
+        async def ainvoke(self, prompt: str):
+            self.prompts.append(prompt)
+            return await super().ainvoke(prompt)
+
+    root = _tmp_root()
+    writer = CaptureWriterLLM()
+    app = create_app(
+        planner_llm=ApiPlannerLLM(),
+        writer_llm=writer,
+        projects_root=root / "projects",
+        vector_root=root / "vector",
+        checkpoint_root=root / "states",
+    )
+    client = TestClient(app)
+
+    r = client.post(
+        "/projects",
+        json={"instruction": "都市悬疑", "total_chapters": 2, "style_constraint": "冷峻克制，短句。"},
+    )
+    assert r.status_code == 200
+    project_id = r.json()["project_id"]
+
+    r = client.get(f"/projects/{project_id}")
+    assert r.status_code == 200
+    assert r.json().get("style_constraint") == "冷峻克制，短句。"
+
+    r = client.patch(f"/projects/{project_id}", json={"style_constraint": "黑色电影感，避免网络口语。"})
+    assert r.status_code == 200
+    assert r.json().get("style_constraint") == "黑色电影感，避免网络口语。"
+
+    r = client.post(f"/projects/{project_id}/plot-ideas", json={"instruction": "都市悬疑"})
+    ideas = r.json()["plot_ideas"]
+    r = client.post(
+        f"/projects/{project_id}/outline",
+        json={"selected_plot_summary": ideas[0], "total_chapters": 2},
+    )
+    assert r.status_code == 200
+
+    r = client.post(f"/projects/{project_id}/chapters/next", json={})
+    assert r.status_code == 200
+    assert any("【文风约束】" in p and "黑色电影感" in p for p in writer.prompts)
+
+    r = client.post(
+        f"/projects/{project_id}/chapters/0/rewrite",
+        json={"user_feedback": "结尾更悬疑", "style_constraint": "更克制、更冷调。"},
+    )
+    assert r.status_code == 200
+    assert any("【文风约束】" in p and "更克制、更冷调。" in p for p in writer.prompts)
+
+    shutil.rmtree(root, ignore_errors=True)
+
+
 def run_all():
     test_phase5_api_flow()
     test_phase5_outline_multi_phase_api()
     test_phase5_extend_failure_not_persisted()
+    test_style_constraint_persist_and_apply_in_api()
     print("Phase 5 acceptance: all passed.")
 
 

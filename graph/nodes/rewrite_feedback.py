@@ -80,7 +80,6 @@ async def rewrite_with_feedback_node(
         if int(item.get("index", -1)) == current_idx:
             item["path_or_content_ref"] = ref
             item["word_count"] = len(rewritten.replace("\n", ""))
-            item["summary"] = rewritten[:120]
 
     return {
         "current_chapter_final": rewritten,

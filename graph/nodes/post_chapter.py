@@ -68,6 +68,12 @@ async def post_chapter_node(
         chapter_summary = chapter_text[:300]
     indexer.add_chapter_summary(project_id, current_idx, chapter_summary)
 
+    chapters = list(state.get("chapters", []))
+    for item in chapters:
+        if int(item.get("index", -1)) == current_idx:
+            item["summary"] = chapter_summary
+            break
+
     extract_prompt = (
         "从以下章节中抽取人物节点与关系边，并仅输出 JSON：\n"
         '{"nodes":[{"id":"id","name":"姓名","description":"可选"}],'
@@ -147,6 +153,7 @@ async def post_chapter_node(
 
     return {
         "last_chapter_summary": chapter_summary,
+        "chapters": chapters,
         "character_graph": merged_graph,
         "canon_overrides": canon_overrides,
         "consistency_report": consistency_report,
