@@ -159,6 +159,7 @@ class RewriteRequest(BaseModel):
 class RegenerateChapterRequest(BaseModel):
     chapter_word_target: Optional[int] = None
     enable_chapter_illustrations: Optional[bool] = None
+    style_constraint: Optional[str] = None
 
 
 def _default_state(project_id: str) -> Dict[str, Any]:

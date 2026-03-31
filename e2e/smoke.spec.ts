@@ -21,9 +21,13 @@ test.describe("Novel Writer Agent UI smoke", () => {
 
     await expect(page.locator("#project-list")).toBeVisible();
 
+    await expect(page.locator("#btn-open-kb-modal")).toBeVisible();
+    await page.locator("#btn-open-kb-modal").click();
+    await expect(page.locator("#knowledge-base-modal")).toBeVisible();
     await expect(page.getByRole("heading", { name: "同人知识库" })).toBeVisible();
     await expect(page.locator("#btn-create-kb")).toBeVisible();
     await expect(page.locator("#btn-refresh-kb")).toBeVisible();
+    await expect(page.locator("#kb-target-project-select")).toHaveCount(0);
   });
 
   test("刷新项目列表不会报错（需要后端已启动）", async ({ page }) => {

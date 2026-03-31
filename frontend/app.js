@@ -1,4 +1,5 @@
 const API_BASE = typeof window !== "undefined" && window.API_BASE ? window.API_BASE : "";
+const KB_NONE_VALUE = "__none__";
 
 function installLiveServerReloadGuard() {
   if (typeof window === "undefined") return;
@@ -256,35 +257,49 @@ async function apiUploadMultipart(urlPath, file) {
   return resp.json();
 }
 
-function getSelectedKbIdsFromUi() {
-  const nodes = document.querySelectorAll(".kb-bind-cb");
-  const ids = [];
-  nodes.forEach((cb) => {
-    if (cb.checked) ids.push(cb.value);
-  });
-  return ids;
-}
-
-function updateKbBindLock() {
-  const noProject = !state.currentProjectId;
-  const locked = Boolean(state.currentProjectId && state.currentProjectKbBindLocked);
-  document.querySelectorAll(".kb-bind-cb").forEach((cb) => {
-    cb.disabled = noProject || locked;
-  });
-}
-
-async function patchProjectKnowledgeBases() {
-  if (!state.currentProjectId || state.currentProjectKbBindLocked) return;
-  const ids = getSelectedKbIdsFromUi();
-  try {
-    await api.patch(`/projects/${state.currentProjectId}/knowledge-bases`, {
-      selected_kb_ids: ids,
+function applyCreateKbMutualExclusion() {
+  if (!el.createKbSelect) return;
+  const options = Array.from(el.createKbSelect.options);
+  const noneOpt = options.find((opt) => opt.value === KB_NONE_VALUE);
+  if (!noneOpt) return;
+  const selectedValues = options.filter((opt) => opt.selected).map((opt) => opt.value);
+  if (selectedValues.includes(KB_NONE_VALUE) && selectedValues.length > 1) {
+    options.forEach((opt) => {
+      opt.selected = opt.value === KB_NONE_VALUE;
     });
-    state.currentProjectKbIds = ids;
-    setStatus(`已更新知识库绑定（${ids.length} 个）`);
-  } catch (e) {
-    setStatus(`知识库绑定失败：${e.message}`);
+    return;
   }
+  const hasOther = selectedValues.some((v) => v !== KB_NONE_VALUE);
+  if (hasOther && noneOpt.selected) {
+    noneOpt.selected = false;
+  }
+}
+
+function getSelectedKbIdsForCreate() {
+  if (!el.createKbSelect) return [];
+  applyCreateKbMutualExclusion();
+  const selectedValues = Array.from(el.createKbSelect.selectedOptions).map((opt) => String(opt.value || ""));
+  if (!selectedValues.length || selectedValues.includes(KB_NONE_VALUE)) return [];
+  return selectedValues;
+}
+
+function populateCreateKbMultiSelect() {
+  if (!el.createKbSelect) return;
+  const prevSelected = new Set(Array.from(el.createKbSelect.selectedOptions).map((opt) => String(opt.value || "")));
+  el.createKbSelect.innerHTML = "";
+  const noneOpt = document.createElement("option");
+  noneOpt.value = KB_NONE_VALUE;
+  noneOpt.textContent = "无";
+  noneOpt.selected = prevSelected.size === 0 || prevSelected.has(KB_NONE_VALUE);
+  el.createKbSelect.appendChild(noneOpt);
+  state.knowledgeBases.forEach((kb) => {
+    const opt = document.createElement("option");
+    opt.value = kb.kb_id;
+    opt.textContent = kb.name || kb.kb_id;
+    opt.selected = prevSelected.has(kb.kb_id);
+    el.createKbSelect.appendChild(opt);
+  });
+  applyCreateKbMutualExclusion();
 }
 
 async function loadKnowledgeBases() {
@@ -292,6 +307,7 @@ async function loadKnowledgeBases() {
     const data = await api.get("/knowledge-bases");
     state.knowledgeBases = data.knowledge_bases || [];
     renderKbList();
+    populateCreateKbMultiSelect();
     populateKbAssetsSelect();
     if (el.kbAssetsPanel) {
       el.kbAssetsPanel.hidden = state.knowledgeBases.length === 0;
@@ -330,24 +346,11 @@ async function renderKbList() {
     li.className = "kb-item";
     const head = document.createElement("div");
     head.className = "kb-item-head";
-    const label = document.createElement("label");
-    label.className = "checkbox kb-bind-label";
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.className = "kb-bind-cb";
-    cb.value = id;
-    cb.checked = state.currentProjectKbIds.includes(id);
-    cb.addEventListener("change", () => {
-      patchProjectKnowledgeBases();
-    });
-    label.appendChild(cb);
-    label.appendChild(document.createTextNode(" 绑定当前项目"));
     const strong = document.createElement("strong");
     strong.textContent = kb.name || id;
     const code = document.createElement("code");
     code.className = "kb-id";
     code.textContent = id;
-    head.appendChild(label);
     head.appendChild(strong);
     head.appendChild(code);
     li.appendChild(head);
@@ -374,7 +377,6 @@ async function renderKbList() {
         .join("；");
     });
   }
-  updateKbBindLock();
 }
 
 async function pollKbJob(kbId, jobId) {
@@ -507,6 +509,7 @@ const el = {
   plotIdeas: document.getElementById("plot-ideas"),
   customSummary: document.getElementById("custom-summary-input"),
   totalChapters: document.getElementById("total-chapters-input"),
+  createKbSelect: document.getElementById("create-kb-select"),
   selectedIdeaView: document.getElementById("selected-idea-view"),
   projectMeta: document.getElementById("project-meta"),
   tokenUsage: document.getElementById("token-usage"),
@@ -550,6 +553,9 @@ const el = {
   btnRegenerateChapter: document.getElementById("btn-regenerate-chapter"),
   btnRewrite: document.getElementById("btn-rewrite"),
   btnRefreshKb: document.getElementById("btn-refresh-kb"),
+  btnOpenKbModal: document.getElementById("btn-open-kb-modal"),
+  kbModal: document.getElementById("knowledge-base-modal"),
+  btnCloseKbModal: document.getElementById("btn-close-kb-modal"),
   btnCreateKb: document.getElementById("btn-create-kb"),
   kbNewName: document.getElementById("kb-new-name-input"),
   kbList: document.getElementById("kb-list"),
@@ -1340,6 +1346,17 @@ function closeDeleteModal() {
   state.pendingDeleteProjectId = null;
 }
 
+function openKnowledgeBaseModal() {
+  if (!el.kbModal) return;
+  el.kbModal.hidden = false;
+  void loadKnowledgeBases();
+}
+
+function closeKnowledgeBaseModal() {
+  if (!el.kbModal) return;
+  el.kbModal.hidden = true;
+}
+
 async function confirmDeleteProject() {
   const projectId = state.pendingDeleteProjectId;
   if (!projectId) return;
@@ -1738,7 +1755,7 @@ async function generateIdeas() {
     if (!state.currentProjectId) {
       setStatus("创建项目...");
       const totalChapters = parseTotalChaptersInput();
-      const selectedKbIds = getSelectedKbIdsFromUi();
+      const selectedKbIds = getSelectedKbIdsForCreate();
       const p = await api.post("/projects", {
         instruction,
         ...(totalChapters ? { total_chapters: totalChapters } : {}),
@@ -1793,7 +1810,7 @@ async function generateOutline() {
       setStatus("正在创建项目...");
       const instruction = String((el.instruction && el.instruction.value) || "").trim();
       const totalChapters = parseTotalChaptersInput();
-      const selectedKbIds = getSelectedKbIdsFromUi();
+      const selectedKbIds = getSelectedKbIdsForCreate();
       const p = await api.post("/projects", {
         instruction,
         ...(totalChapters ? { total_chapters: totalChapters } : {}),
@@ -2061,6 +2078,8 @@ function bindEvents() {
   bindClick(el.btnCloseCharacterGraphModal, closeCharacterGraphModal);
   bindClick(el.btnCloseEventLogModal, closeEventLogModal);
   bindClick(el.btnRefreshKb, loadKnowledgeBases);
+  bindClick(el.btnOpenKbModal, openKnowledgeBaseModal);
+  bindClick(el.btnCloseKbModal, closeKnowledgeBaseModal);
   bindClick(el.btnCreateKb, createKnowledgeBase);
   bindClick(el.btnLoadKbAssets, loadKbAssetsSummary);
   bindClick(el.btnProjectRenameConfirm, confirmRenameProject);
@@ -2087,6 +2106,11 @@ function bindEvents() {
   if (el.customSummary) {
     el.customSummary.addEventListener("input", () => {
       syncSummarySourceState();
+    });
+  }
+  if (el.createKbSelect) {
+    el.createKbSelect.addEventListener("change", () => {
+      applyCreateKbMutualExclusion();
     });
   }
 
@@ -2144,6 +2168,13 @@ function bindEvents() {
       }
     });
   }
+  if (el.kbModal) {
+    el.kbModal.addEventListener("click", (event) => {
+      if (event.target && event.target.getAttribute("data-close-kb") === "true") {
+        closeKnowledgeBaseModal();
+      }
+    });
+  }
   document.addEventListener("click", (event) => {
     if (!el.projectContextMenu || el.projectContextMenu.hidden) return;
     if (el.projectContextMenu.contains(event.target)) return;
@@ -2162,6 +2193,7 @@ function bindEvents() {
       closeProjectContextMenu();
       closeRenameModal();
       closeDeleteModal();
+      closeKnowledgeBaseModal();
     }
     if (event.key === "Enter" && !el.projectRenameModal.hidden) {
       const target = event.target;

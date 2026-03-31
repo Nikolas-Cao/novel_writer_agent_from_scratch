@@ -151,12 +151,11 @@ async def write_chapter_node(
 
     overrides_block = format_canon_overrides(state.get("canon_overrides"))
     kb_block = ""
-    if kb_assets_text.strip() or kb_evidence_text.strip():
+    if kb_assets_text.strip():
         kb_block = (
             f"\n\n{overrides_block}\n\n"
             "【优先级】二创设定与上文已写情节 > 参考知识库（原著）。若冲突，遵循二创与本章要点。\n"
-            f"【知识库分层摘要】\n{kb_assets_text[:8000] or '（无）'}\n\n"
-            f"【知识库证据摘录】\n{kb_evidence_text[:9000] or '（无）'}"
+            f"【知识库分层摘要】\n{kb_assets_text[:8000] or '（无）'}"
         )
     elif overrides_block.strip():
         kb_block = f"\n\n{overrides_block}"

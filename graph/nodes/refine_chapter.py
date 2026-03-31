@@ -48,13 +48,11 @@ async def refine_chapter_node(
     if ov.strip():
         guard += ov + "\n\n"
     kb_a = (state.get("kb_assets_text") or "").strip()
-    kb_e = (state.get("kb_evidence_text") or "").strip()
-    if kb_a or kb_e:
+    if kb_a:
         guard += (
             "【一致性】若正文与「二创设定覆盖」冲突，以保持二创为准；"
-            "知识库摘录仅用于修正明显笔误或称谓，勿用原著覆盖已写二创情节。\n"
+            "知识库摘要仅用于校验称谓/设定一致性，勿用原著覆盖已写二创情节。\n"
             f"【知识库摘要（节选）】\n{kb_a[:4000]}\n\n"
-            f"【知识库证据（节选）】\n{kb_e[:4000]}\n\n"
         )
     style_constraint = str(state.get("style_constraint") or "").strip()
     style_constraint_block = ""

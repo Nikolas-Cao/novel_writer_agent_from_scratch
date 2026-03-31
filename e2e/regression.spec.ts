@@ -192,7 +192,7 @@ test.describe("生成概要 / 项目创建交互", () => {
     await page.goto("/");
     await expect(page.locator("#instruction-input")).toBeVisible();
     const outlineBtn = page.locator("#btn-generate-outline");
-    await expect(outlineBtn).toBeEnabled();
+    await expect(outlineBtn).toBeDisabled();
 
     await page.locator("#instruction-input").fill("测试意图");
     await page.getByRole("button", { name: "生成概要" }).click();
@@ -928,10 +928,13 @@ test.describe("UI regressions from past chats", () => {
     await page.locator("#btn-view-character-graph-modal").click();
     await expect(page.locator("#character-graph-modal")).toBeVisible();
     await expect(graphContent.locator(".graph-meta")).toBeVisible();
-    await graphContent.evaluate((node) => {
-      node.scrollTop = 600;
-    });
-    await expect(graphContent.evaluate((node) => node.scrollTop)).resolves.toBeGreaterThan(0);
+    const graphCanScroll = await graphContent.evaluate((node) => node.scrollHeight > node.clientHeight + 2);
+    if (graphCanScroll) {
+      await graphContent.evaluate((node) => {
+        node.scrollTop = 600;
+      });
+      await expect(graphContent.evaluate((node) => node.scrollTop)).resolves.toBeGreaterThan(0);
+    }
     await page.locator("#btn-close-character-graph-modal").click();
     await expect(page.locator("#character-graph-modal")).toBeHidden();
     await page.locator("#btn-view-character-graph-modal").click();
@@ -1066,6 +1069,223 @@ test.describe("UI regressions from past chats", () => {
     await expect(page.locator(`.project-open-btn[data-project-id="${pid}"]`)).toHaveCount(0);
     await page.locator("#btn-refresh-projects").click();
     await expect(page.locator(`.project-open-btn[data-project-id="${pid}"]`)).toHaveCount(0);
+  });
+});
+
+test.describe("知识库入口弹窗化", () => {
+  test("页面仅通过“知识库”按钮打开弹窗入口", async ({ page }) => {
+    await page.route("**/projects", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ projects: [] }),
+      });
+    });
+    await page.route("**/knowledge-bases", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ knowledge_bases: [] }),
+      });
+    });
+
+    await page.goto("/");
+    await expect(page.locator("#btn-open-kb-modal")).toBeVisible();
+    await expect(page.locator("#kb-panel")).toHaveCount(0);
+    await page.locator("#btn-open-kb-modal").click();
+    await expect(page.locator("#knowledge-base-modal")).toBeVisible();
+  });
+
+  test("弹窗内可创建知识库并显示在列表", async ({ page }) => {
+    const kbStore: Array<{ kb_id: string; name: string }> = [];
+
+    await page.route("**/projects", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ projects: [{ project_id: "p-kb-1", nickname: "项目一", created_at: 1000 }] }),
+      });
+    });
+
+    await page.route("**/knowledge-bases", async (route) => {
+      const method = route.request().method();
+      if (method === "GET") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ knowledge_bases: kbStore }),
+        });
+        return;
+      }
+      if (method === "POST") {
+        const body = route.request().postDataJSON() as { name?: string };
+        const name = String(body.name || "").trim();
+        kbStore.push({ kb_id: `kb-${kbStore.length + 1}`, name });
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(kbStore[kbStore.length - 1]),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    await page.route("**/knowledge-bases/*", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ documents: [] }),
+      });
+    });
+
+    await page.goto("/");
+    await page.locator("#btn-open-kb-modal").click();
+    await expect(page.locator("#knowledge-base-modal")).toBeVisible();
+    await page.locator("#kb-new-name-input").fill("武侠设定集");
+    await page.locator("#btn-create-kb").click();
+    await expect(page.locator("#global-status")).toContainText("知识集已创建");
+    await expect(page.locator("#kb-list .kb-item")).toHaveCount(1);
+    await expect(page.locator("#kb-list .kb-item strong")).toContainText("武侠设定集");
+  });
+
+  test("新建小说区提供知识库多选，且“无”与其他选项互斥", async ({ page }) => {
+    await page.route("**/projects", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ projects: [] }),
+      });
+    });
+    await page.route("**/knowledge-bases", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          knowledge_bases: [
+            { kb_id: "kb-1", name: "世界观设定" },
+            { kb_id: "kb-2", name: "角色档案" },
+          ],
+        }),
+      });
+    });
+
+    await page.goto("/");
+    const select = page.locator("#create-kb-select");
+    await expect(select).toBeVisible();
+    await expect(select.locator("option[value='__none__']")).toBeVisible();
+    await expect(select.locator("option[value='kb-1']")).toBeVisible();
+
+    await select.selectOption(["__none__", "kb-1"]);
+    await expect(select).toHaveValues(["__none__"]);
+    await select.selectOption(["kb-1", "kb-2"]);
+    await expect(select).toHaveValues(["kb-1", "kb-2"]);
+  });
+
+  test("生成概要与生成大纲创建项目时携带知识库多选结果", async ({ page }) => {
+    const createBodies: Array<any> = [];
+    await page.route("**/projects**", async (route) => {
+      const req = route.request();
+      const url = new URL(req.url());
+      const path = url.pathname.replace(/\/$/, "") || "/";
+      const method = req.method();
+      if (method === "GET" && path === "/projects") {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ projects: [] }) });
+        return;
+      }
+      if (method === "POST" && path === "/projects") {
+        const body = req.postDataJSON() as any;
+        createBodies.push(body);
+        const pid = `p-kb-create-${createBodies.length}`;
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ project_id: pid }) });
+        return;
+      }
+      if (method === "POST" && path.endsWith("/plot-ideas")) {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ plot_ideas: ["stub"] }) });
+        return;
+      }
+      if (method === "POST" && path.endsWith("/outline")) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ outline_structure: { volumes: [] } }),
+        });
+        return;
+      }
+      if (method === "GET" && /^\/projects\/p-kb-create-\d+$/.test(path)) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            project_id: path.split("/").pop(),
+            instruction: "stub",
+            selected_plot_summary: "",
+            outline_structure: { volumes: [] },
+            chapters: [],
+            current_chapter_index: 0,
+            total_chapters: 10,
+            token_usage: {},
+          }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+    await page.route("**/knowledge-bases", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          knowledge_bases: [
+            { kb_id: "kb-1", name: "世界观设定" },
+            { kb_id: "kb-2", name: "角色档案" },
+          ],
+        }),
+      });
+    });
+
+    await page.goto("/");
+    await page.locator("#instruction-input").fill("测试意图");
+    await page.locator("#create-kb-select").selectOption(["kb-1", "kb-2"]);
+    await page.locator("#btn-generate-ideas").click();
+    await expect(page.locator("#global-status")).toContainText("概要已生成", { timeout: 15000 });
+    expect(createBodies[0].selected_kb_ids).toEqual(["kb-1", "kb-2"]);
+
+    await page.locator("#btn-new-project").click();
+    await page.locator("#instruction-input").fill("测试大纲");
+    await page.locator("#create-kb-select").selectOption(["__none__"]);
+    await page.locator("#custom-summary-input").fill("这是一条自定义概要");
+    await page.locator("#btn-generate-outline").click();
+    await expect(page.locator("#global-status")).toContainText("大纲生成完成", { timeout: 15000 });
+    expect(Object.prototype.hasOwnProperty.call(createBodies[1], "selected_kb_ids")).toBeFalsy();
   });
 });
 

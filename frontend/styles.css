@@ -143,6 +143,30 @@ input[type="number"] {
   transition: box-shadow 0.2s ease, border-color 0.2s ease, background 0.2s ease;
 }
 
+select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #dbe2ee;
+  border-radius: 10px;
+  background: #fff;
+  outline: none;
+}
+
+select:focus {
+  border-color: rgba(15, 23, 42, 0.35);
+  box-shadow: 0 0 0 3px rgba(15, 23, 42, 0.08);
+}
+
+#create-kb-select {
+  min-height: 112px;
+}
+
+.kb-select-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: #64748b;
+}
+
 input[type="number"]:focus {
   border-color: #6366f1;
   box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
@@ -470,6 +494,8 @@ button:disabled:active {
 .graph-modal-content {
   padding: 14px;
   line-height: 1.7;
+  max-height: 70vh;
+  overflow-y: auto;
 }
 
 .panel-detail .list button {
@@ -728,6 +754,7 @@ button:disabled:active {
   border: none;
   border-radius: 0;
   min-height: 0;
+  flex: 1 1 auto;
   max-height: none;
   overflow-y: auto;
 }
@@ -1362,6 +1389,22 @@ button:disabled {
   word-break: break-word;
 }
 
+.kb-modal-content {
+  padding: 14px;
+}
+
+.kb-modal-section {
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 12px;
+  background: #fff;
+}
+
+.kb-modal-section h4 {
+  margin: 0 0 8px;
+  color: #0f172a;
+}
+
 .event-log-list {
   display: flex;
   flex-direction: column;
@@ -1432,3 +1475,4 @@ button:disabled {
   margin: 12px;
   color: #64748b;
 }
+
