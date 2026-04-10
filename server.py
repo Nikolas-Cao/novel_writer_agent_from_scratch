@@ -419,6 +419,9 @@ def create_app(
                 raw_path,
                 planner,
                 cancel_check=lambda: ev.is_set(),
+                kb_id=kb_id,
+                doc_id=doc_id,
+                job_id=job_id,
             )
             kb_store.save_assets_doc(kb_id, doc_id, assets)
             kb_store.upsert_document_record(

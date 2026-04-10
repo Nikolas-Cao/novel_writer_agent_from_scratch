@@ -1387,19 +1387,28 @@ button:disabled {
 
 .kb-assets-view {
   margin-top: 8px;
-  max-height: 200px;
+  max-height: min(72vh, 820px);
   overflow: auto;
-  font-size: 11px;
-  line-height: 1.4;
+  font-size: 15px;
+  line-height: 1.65;
   background: #f8fafc;
   border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  padding: 8px;
-  white-space: pre-wrap;
+  border-radius: 12px;
+  padding: 16px;
+  white-space: pre;
   word-break: break-word;
 }
 
 .kb-modal-content {
+  padding: 14px;
+}
+
+.kb-assets-modal-dialog {
+  width: min(1180px, 95vw) !important;
+  max-height: 90vh !important;
+}
+
+.kb-assets-modal-content {
   padding: 14px;
 }
 

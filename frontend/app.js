@@ -435,11 +435,24 @@ async function loadKbAssetsSummary() {
   try {
     const data = await api.get(`/knowledge-bases/${kbId}/assets/summary`);
     el.kbAssetsView.textContent = JSON.stringify(data.assets || {}, null, 2);
+    if (el.kbAssetsModal) {
+      el.kbAssetsModal.hidden = false;
+      resetModalContentScrollToTop(el.kbAssetsView);
+    }
     setStatus("摘要已加载");
   } catch (e) {
     el.kbAssetsView.textContent = e.message;
+    if (el.kbAssetsModal) {
+      el.kbAssetsModal.hidden = false;
+      resetModalContentScrollToTop(el.kbAssetsView);
+    }
     setStatus(`加载摘要失败：${e.message}`);
   }
+}
+
+function closeKbAssetsModal() {
+  if (!el.kbAssetsModal) return;
+  el.kbAssetsModal.hidden = true;
 }
 
 function extractBackendErrorMessage(resp, rawText) {
@@ -564,6 +577,8 @@ const el = {
   kbAssetsKbSelect: document.getElementById("kb-assets-kb-select"),
   btnLoadKbAssets: document.getElementById("btn-load-kb-assets"),
   kbAssetsView: document.getElementById("kb-assets-view"),
+  kbAssetsModal: document.getElementById("kb-assets-modal"),
+  btnCloseKbAssetsModal: document.getElementById("btn-close-kb-assets-modal"),
   projectContextMenu: document.getElementById("project-context-menu"),
   projectRenameModal: document.getElementById("project-rename-modal"),
   projectRenameInput: document.getElementById("project-rename-input"),
@@ -2125,6 +2140,7 @@ function bindEvents() {
   bindClick(el.btnCloseKbModal, closeKnowledgeBaseModal);
   bindClick(el.btnCreateKb, createKnowledgeBase);
   bindClick(el.btnLoadKbAssets, loadKbAssetsSummary);
+  bindClick(el.btnCloseKbAssetsModal, closeKbAssetsModal);
   bindClick(el.btnProjectRenameConfirm, confirmRenameProject);
   bindClick(el.btnProjectRenameCancel, closeRenameModal);
   bindClick(el.btnProjectDeleteConfirm, confirmDeleteProject);
@@ -2218,6 +2234,13 @@ function bindEvents() {
       }
     });
   }
+  if (el.kbAssetsModal) {
+    el.kbAssetsModal.addEventListener("click", (event) => {
+      if (event.target && event.target.getAttribute("data-close-kb-assets") === "true") {
+        closeKbAssetsModal();
+      }
+    });
+  }
   document.addEventListener("click", (event) => {
     if (!el.projectContextMenu || el.projectContextMenu.hidden) return;
     if (el.projectContextMenu.contains(event.target)) return;
@@ -2237,6 +2260,7 @@ function bindEvents() {
       closeRenameModal();
       closeDeleteModal();
       closeKnowledgeBaseModal();
+      closeKbAssetsModal();
     }
     if (event.key === "Enter" && !el.projectRenameModal.hidden) {
       const target = event.target;
