@@ -86,6 +86,19 @@ class FakePlannerLLM:
         return _Resp("{}")
 
 
+class CaptureOutlineModePlannerLLM(FakePlannerLLM):
+    def __init__(self) -> None:
+        self.saw_single = False
+        self.saw_skeleton_lite = False
+
+    async def ainvoke(self, prompt: str):
+        if "【plan_outline_single】" in prompt:
+            self.saw_single = True
+        if "【plan_outline_skeleton_lite】" in prompt or "【plan_outline_skeleton】" in prompt:
+            self.saw_skeleton_lite = True
+        return await super().ainvoke(prompt)
+
+
 class FakeWriterLLM:
     async def ainvoke(self, prompt: str):
         if "润色" in prompt:
@@ -148,6 +161,7 @@ def test_plan_outline_multi_phase_batches_and_rag():
 
 
 def test_plan_outline_skeleton_batch_alignment_202():
+    from graph.nodes import plan_outline as po
     from graph.nodes.plan_outline import plan_outline_node
 
     n = 202
@@ -158,8 +172,28 @@ def test_plan_outline_skeleton_batch_alignment_202():
     for vol in structure.get("volumes") or []:
         refs.extend(vol.get("chapters") or [])
     assert len(refs) == n
-    assert str(refs[0].get("description") or "").strip()
-    assert str(refs[-1].get("description") or "").strip()
+    if po.DEBUG:
+        assert all(isinstance(ch.get("points"), list) and len(ch["points"]) >= 1 for ch in refs)
+    else:
+        assert str(refs[0].get("description") or "").strip()
+        assert str(refs[-1].get("description") or "").strip()
+
+
+def test_plan_outline_debug_mode_forces_single_call(monkeypatch):
+    from graph.nodes import plan_outline as po
+    from graph.nodes.plan_outline import plan_outline_node
+
+    monkeypatch.setattr(po, "DEBUG", True)
+    n = po.PLAN_OUTLINE_SINGLE_CALL_MAX + 5
+    state = {"selected_plot_summary": "debug 模式大纲", "total_chapters": n}
+    llm = CaptureOutlineModePlannerLLM()
+    out = asyncio.run(plan_outline_node(state, llm=llm))
+    refs = []
+    for vol in (out.get("outline_structure") or {}).get("volumes") or []:
+        refs.extend(vol.get("chapters") or [])
+    assert len(refs) == n
+    assert llm.saw_single is True
+    assert llm.saw_skeleton_lite is False
 
 
 def test_skeleton_lite_parse_payload_accepts_short_and_long_keys():

@@ -21,28 +21,9 @@
       <div class="panel-list-actions">
         <button type="button" id="btn-refresh-projects">刷新项目</button>
         <button type="button" id="btn-new-project">新建项目</button>
+        <button type="button" id="btn-open-kb-modal">知识库</button>
       </div>
       <ul id="project-list" class="list"></ul>
-      <div id="kb-panel" class="kb-panel">
-        <h3>同人知识库</h3>
-        <p class="kb-hint">支持 <code>.txt</code> / <code>.md</code>。勾选「绑定当前项目」后参与写纲与写章；生成大纲后绑定不可改。</p>
-        <div class="row">
-          <button type="button" id="btn-refresh-kb">刷新知识库</button>
-        </div>
-        <div class="row kb-create-row">
-          <input type="text" id="kb-new-name-input" placeholder="新知识集名称" />
-          <button type="button" id="btn-create-kb">创建知识集</button>
-        </div>
-        <ul id="kb-list" class="list kb-list"></ul>
-        <div id="kb-assets-panel" class="kb-assets-panel" hidden>
-          <label for="kb-assets-kb-select">查看知识摘要资产</label>
-          <div class="row">
-            <select id="kb-assets-kb-select"></select>
-            <button type="button" id="btn-load-kb-assets">加载摘要</button>
-          </div>
-          <pre id="kb-assets-view" class="kb-assets-view"></pre>
-        </div>
-      </div>
     </section>
 
     <section class="panel panel-create">
@@ -68,6 +49,9 @@
         step="1"
         placeholder="例如：100"
       />
+      <label for="create-kb-select">参考知识库（可多选）</label>
+      <select id="create-kb-select" multiple></select>
+      <p class="kb-select-hint">可多选知识库；“无”与其他选项互斥。</p>
       <div class="row">
         <button type="button" id="btn-generate-outline">生成大纲</button>
       </div>
@@ -222,6 +206,37 @@
           <button type="button" id="btn-project-delete-cancel">取消</button>
           <button type="button" id="btn-project-delete-confirm" class="danger-btn">确认删除</button>
         </div>
+      </div>
+    </div>
+  </div>
+  <div id="knowledge-base-modal" class="modal" hidden>
+    <div class="modal-backdrop" data-close-kb="true"></div>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="knowledge-base-modal-title">
+      <div class="modal-head">
+        <h3 id="knowledge-base-modal-title">知识库管理</h3>
+        <button type="button" id="btn-close-kb-modal" class="btn-modal-close">关闭</button>
+      </div>
+      <div class="modal-content kb-modal-content">
+        <section class="kb-modal-section">
+          <h4>同人知识库</h4>
+          <p class="kb-hint">支持 <code>.txt</code> / <code>.md</code>。在本弹窗中可创建、查看与上传知识库文档。</p>
+          <div class="row">
+            <button type="button" id="btn-refresh-kb">刷新知识库</button>
+          </div>
+          <div class="row kb-create-row">
+            <input type="text" id="kb-new-name-input" placeholder="新知识集名称" />
+            <button type="button" id="btn-create-kb">创建知识集</button>
+          </div>
+          <ul id="kb-list" class="list kb-list"></ul>
+          <div id="kb-assets-panel" class="kb-assets-panel" hidden>
+            <label for="kb-assets-kb-select">查看知识摘要资产</label>
+            <div class="row">
+              <select id="kb-assets-kb-select"></select>
+              <button type="button" id="btn-load-kb-assets">加载摘要</button>
+            </div>
+            <pre id="kb-assets-view" class="kb-assets-view"></pre>
+          </div>
+        </section>
       </div>
     </div>
   </div>

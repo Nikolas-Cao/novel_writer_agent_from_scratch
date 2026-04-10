@@ -159,6 +159,7 @@ class RewriteRequest(BaseModel):
 class RegenerateChapterRequest(BaseModel):
     chapter_word_target: Optional[int] = None
     enable_chapter_illustrations: Optional[bool] = None
+    style_constraint: Optional[str] = None
 
 
 def _default_state(project_id: str) -> Dict[str, Any]:
@@ -891,6 +892,7 @@ def create_app(
             "project_id": project_id,
             "nickname": state.get("nickname"),
             "instruction": state.get("instruction", ""),
+            "plot_ideas": state.get("plot_ideas") or [],
             "style_constraint": state.get("style_constraint", ""),
             "selected_plot_summary": state.get("selected_plot_summary", ""),
             "outline_structure": state.get("outline_structure", {"volumes": []}),

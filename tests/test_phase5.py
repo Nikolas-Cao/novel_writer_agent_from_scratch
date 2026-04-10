@@ -375,6 +375,13 @@ def test_style_constraint_persist_and_apply_in_api():
     assert r.status_code == 200
     assert any("【文风约束】" in p and "更克制、更冷调。" in p for p in writer.prompts)
 
+    r = client.post(
+        f"/projects/{project_id}/chapters/0/regenerate",
+        json={"style_constraint": "极简冷调，减少修辞。"},
+    )
+    assert r.status_code == 200
+    assert any("【文风约束】" in p and "极简冷调，减少修辞。" in p for p in writer.prompts)
+
     shutil.rmtree(root, ignore_errors=True)
 
 
