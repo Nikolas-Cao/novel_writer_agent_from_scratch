@@ -1550,5 +1550,189 @@ test.describe("知识库入口弹窗化", () => {
     await expect(page.locator("#global-status")).toContainText("大纲生成完成", { timeout: 15000 });
     expect(Object.prototype.hasOwnProperty.call(createBodies[1], "selected_kb_ids")).toBeFalsy();
   });
+
+  test("知识摘要弹窗可编辑并保存结构化 JSON", async ({ page }) => {
+    let savedAssetsBody: any = null;
+    const initialAssets = {
+      global_summary: "初始摘要",
+      characters: [{ name: "角色A", aliases: [], role: "主角", relations: "与角色B搭档" }],
+      timeline: [{ order: 1, event: "事件一", actors: "角色A, 角色B" }],
+      world_rules: [{ rule: "规则一", note: "备注一" }],
+      core_facts: [{ fact: "事实一", importance: "high" }],
+      leaf_summaries: [{ id: "leaf-1", summary: "leaf" }],
+      section_summaries: [{ id: "section-1", summary: "section" }],
+      by_doc: { d1: { status: "ready", global_summary: "自动摘要" } },
+      status: "ready",
+    };
+
+    await page.route("**/projects", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ projects: [] }),
+      });
+    });
+
+    await page.route("**/knowledge-bases", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ knowledge_bases: [{ kb_id: "kb-1", name: "知识集一" }] }),
+      });
+    });
+
+    await page.route("**/knowledge-bases/kb-1/assets/summary", async (route) => {
+      const method = route.request().method();
+      if (method === "GET") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ kb_id: "kb-1", doc_id: null, assets: initialAssets }),
+        });
+        return;
+      }
+      if (method === "PUT") {
+        savedAssetsBody = route.request().postDataJSON();
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ kb_id: "kb-1", saved: true, assets: savedAssetsBody.assets }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    await page.goto("/");
+    await page.locator("#btn-open-kb-modal").click();
+    await page.locator("#btn-load-kb-assets").click();
+    await expect(page.locator("#kb-assets-modal")).toBeVisible();
+
+    await expect(page.locator("#btn-edit-kb-assets")).toContainText("编辑");
+    await page.locator("#btn-edit-kb-assets").click();
+    await expect(page.locator("#btn-edit-kb-assets")).toContainText("保存");
+    await expect(page.locator("#kb-assets-editor")).toBeVisible();
+
+    const editor = page.locator("#kb-assets-editor");
+    const editable = {
+      global_summary: "人工修订摘要",
+      characters: [{ name: "角色A", aliases: ["A"], role: "主角", relations: "与角色B搭档" }],
+      timeline: [{ order: 1, event: "事件一", actors: "角色A, 角色B" }],
+      world_rules: [{ rule: "规则一", note: "备注一" }],
+      core_facts: [{ fact: "事实一", importance: "high" }],
+      leaf_summaries: [{ id: "leaf-1", summary: "leaf" }],
+      section_summaries: [{ id: "section-1", summary: "section" }],
+    };
+    await editor.fill(JSON.stringify(editable, null, 2));
+    await page.locator("#btn-edit-kb-assets").click();
+
+    await expect(page.locator("#global-status")).toContainText("知识摘要已保存");
+    expect(savedAssetsBody).not.toBeNull();
+    expect(savedAssetsBody.assets.global_summary).toBe("人工修订摘要");
+    expect(savedAssetsBody.assets.by_doc).toBeUndefined();
+    expect(savedAssetsBody.assets.status).toBeUndefined();
+  });
+
+  test("知识摘要保存中重复点击不会触发多次 PUT", async ({ page }) => {
+    let putCount = 0;
+    const initialAssets = {
+      global_summary: "初始摘要",
+      characters: [{ name: "角色A", aliases: [], role: "主角", relations: "与角色B搭档" }],
+      timeline: [{ order: 1, event: "事件一", actors: "角色A, 角色B" }],
+      world_rules: [{ rule: "规则一", note: "备注一" }],
+      core_facts: [{ fact: "事实一", importance: "high" }],
+      leaf_summaries: [{ id: "leaf-1", summary: "leaf" }],
+      section_summaries: [{ id: "section-1", summary: "section" }],
+      by_doc: {},
+      status: "ready",
+    };
+
+    await page.route("**/projects", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ projects: [] }),
+      });
+    });
+
+    await page.route("**/knowledge-bases", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ knowledge_bases: [{ kb_id: "kb-1", name: "知识集一" }] }),
+      });
+    });
+
+    await page.route("**/knowledge-bases/kb-1/assets/summary", async (route) => {
+      const method = route.request().method();
+      if (method === "GET") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ kb_id: "kb-1", doc_id: null, assets: initialAssets }),
+        });
+        return;
+      }
+      if (method === "PUT") {
+        putCount += 1;
+        await new Promise((r) => setTimeout(r, 300));
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ kb_id: "kb-1", saved: true, assets: route.request().postDataJSON().assets }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    await page.goto("/");
+    await page.locator("#btn-open-kb-modal").click();
+    await page.locator("#btn-load-kb-assets").click();
+    await page.locator("#btn-edit-kb-assets").click();
+    await page.locator("#kb-assets-editor").fill(
+      JSON.stringify(
+        {
+          global_summary: "人工修订摘要",
+          characters: [{ name: "角色A", aliases: [], role: "主角", relations: "与角色B搭档" }],
+          timeline: [{ order: 1, event: "事件一", actors: "角色A, 角色B" }],
+          world_rules: [{ rule: "规则一", note: "备注一" }],
+          core_facts: [{ fact: "事实一", importance: "high" }],
+          leaf_summaries: [{ id: "leaf-1", summary: "leaf" }],
+          section_summaries: [{ id: "section-1", summary: "section" }],
+        },
+        null,
+        2
+      )
+    );
+
+    const saveBtn = page.locator("#btn-edit-kb-assets");
+    await page.evaluate(() => {
+      const btn = document.querySelector("#btn-edit-kb-assets") as HTMLButtonElement | null;
+      if (!btn) return;
+      btn.click();
+      btn.click();
+      btn.click();
+    });
+
+    await expect(page.locator("#global-status")).toContainText("知识摘要已保存");
+    expect(putCount).toBe(1);
+  });
 });
 

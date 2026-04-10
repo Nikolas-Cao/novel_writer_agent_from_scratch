@@ -38,6 +38,7 @@ from graph.nodes.update_outline import update_outline_from_feedback_node
 from graph.knowledge_context import build_kb_context_for_outline
 from graph.nodes.write_chapter import write_chapter_node
 from knowledge_base.assets_builder import build_assets_task
+from knowledge_base.assets_schema import validate_assets_payload
 from knowledge_base.ingest import IngestCancelled, run_document_ingest
 from knowledge_base.store import KnowledgeBaseStore
 from memory import LocalFileCheckpointer
@@ -127,6 +128,10 @@ class PatchProjectKnowledgeRequest(BaseModel):
 
 class CreateKnowledgeBaseRequest(BaseModel):
     name: str = Field(..., min_length=1)
+
+
+class SaveKnowledgeAssetsRequest(BaseModel):
+    assets: Dict[str, Any]
 
 
 class PlotIdeasRequest(BaseModel):
@@ -1630,6 +1635,17 @@ def create_app(
             return {"kb_id": kb_id, "doc_id": doc_id, "assets": data}
         data = kb_store.load_assets(kb_id)
         return {"kb_id": kb_id, "doc_id": None, "assets": data}
+
+    @app.put("/knowledge-bases/{kb_id}/assets/summary")
+    async def save_knowledge_assets_summary(kb_id: str, req: SaveKnowledgeAssetsRequest):
+        if not kb_store.get_base(kb_id):
+            raise HTTPException(status_code=404, detail="knowledge base not found")
+        try:
+            assets = validate_assets_payload(req.assets)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        kb_store.save_user_edited_assets(kb_id, assets)
+        return {"kb_id": kb_id, "saved": True, "assets": kb_store.load_assets(kb_id)}
 
     @app.patch("/projects/{project_id}/knowledge-bases")
     async def patch_project_knowledge_bases(project_id: str, req: PatchProjectKnowledgeRequest):

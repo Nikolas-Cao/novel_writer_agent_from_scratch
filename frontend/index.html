@@ -244,10 +244,15 @@
     <div class="modal-dialog kb-assets-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="kb-assets-modal-title">
       <div class="modal-head">
         <h3 id="kb-assets-modal-title">知识摘要</h3>
+        <div class="kb-assets-head-actions">
+          <button type="button" id="btn-edit-kb-assets">编辑</button>
+        </div>
         <button type="button" id="btn-close-kb-assets-modal" class="btn-modal-close">关闭</button>
       </div>
       <div class="modal-content kb-assets-modal-content">
         <pre id="kb-assets-view" class="kb-assets-view"></pre>
+        <textarea id="kb-assets-editor" class="kb-assets-editor" hidden spellcheck="false"></textarea>
+        <div id="kb-assets-edit-error" class="kb-assets-edit-error" hidden></div>
       </div>
     </div>
   </div>

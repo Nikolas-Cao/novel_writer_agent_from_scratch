@@ -102,6 +102,20 @@ const api = {
       .then(ensureOk)
       .then((r) => r.json());
   },
+  put: (url, body) => {
+    const full = apiUrl(url);
+    console.log("[API] PUT", full, body);
+    return fetch(full, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    })
+      .catch((err) => {
+        throw normalizeNetworkError(err, full);
+      })
+      .then(ensureOk)
+      .then((r) => r.json());
+  },
 };
 
 function normalizeNetworkError(err, fullUrl) {
@@ -434,13 +448,19 @@ async function loadKbAssetsSummary() {
   setStatus("加载知识摘要…");
   try {
     const data = await api.get(`/knowledge-bases/${kbId}/assets/summary`);
-    el.kbAssetsView.textContent = JSON.stringify(data.assets || {}, null, 2);
+    state.kbAssetsCurrentKbId = kbId;
+    state.kbAssetsLastLoadedAssets = data.assets || {};
+    setKbAssetsEditing(false);
+    el.kbAssetsView.textContent = JSON.stringify(state.kbAssetsLastLoadedAssets, null, 2);
     if (el.kbAssetsModal) {
       el.kbAssetsModal.hidden = false;
       resetModalContentScrollToTop(el.kbAssetsView);
     }
     setStatus("摘要已加载");
   } catch (e) {
+    state.kbAssetsCurrentKbId = kbId;
+    state.kbAssetsLastLoadedAssets = null;
+    setKbAssetsEditing(false);
     el.kbAssetsView.textContent = e.message;
     if (el.kbAssetsModal) {
       el.kbAssetsModal.hidden = false;
@@ -450,8 +470,163 @@ async function loadKbAssetsSummary() {
   }
 }
 
+function editableKbAssetsFromSource(source) {
+  const out = JSON.parse(JSON.stringify(source || {}));
+  delete out.by_doc;
+  delete out.status;
+  return out;
+}
+
+function setKbAssetsEditError(message) {
+  if (!el.kbAssetsEditError) return;
+  if (!message) {
+    el.kbAssetsEditError.hidden = true;
+    el.kbAssetsEditError.textContent = "";
+    return;
+  }
+  el.kbAssetsEditError.hidden = false;
+  el.kbAssetsEditError.textContent = message;
+}
+
+function validateKbAssetsPayload(payload) {
+  const topFields = [
+    "global_summary",
+    "characters",
+    "timeline",
+    "world_rules",
+    "core_facts",
+    "leaf_summaries",
+    "section_summaries",
+  ];
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("摘要内容必须是 JSON 对象");
+  }
+  const keys = Object.keys(payload);
+  const missing = topFields.filter((k) => !keys.includes(k));
+  const extras = keys.filter((k) => !topFields.includes(k));
+  if (missing.length) throw new Error(`缺少必须字段：${missing.join(", ")}`);
+  if (extras.length) throw new Error(`包含未定义字段：${extras.join(", ")}`);
+  if (typeof payload.global_summary !== "string") {
+    throw new Error("global_summary 必须是字符串");
+  }
+
+  const listSchemas = {
+    characters: { name: "string", aliases: "string[]", role: "string", relations: "string" },
+    timeline: { order: "number", event: "string", actors: "string" },
+    world_rules: { rule: "string", note: "string" },
+    core_facts: { fact: "string", importance: "string" },
+    leaf_summaries: { id: "string", summary: "string" },
+    section_summaries: { id: "string", summary: "string" },
+  };
+
+  Object.entries(listSchemas).forEach(([fieldName, schema]) => {
+    const arr = payload[fieldName];
+    if (!Array.isArray(arr)) {
+      throw new Error(`${fieldName} 必须是数组`);
+    }
+    arr.forEach((item, idx) => {
+      const itemPath = `${fieldName}[${idx}]`;
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        throw new Error(`${itemPath} 必须是对象`);
+      }
+      const expectKeys = Object.keys(schema);
+      const itemKeys = Object.keys(item);
+      const itemMissing = expectKeys.filter((k) => !itemKeys.includes(k));
+      const itemExtras = itemKeys.filter((k) => !expectKeys.includes(k));
+      if (itemMissing.length) throw new Error(`${itemPath} 缺少字段：${itemMissing.join(", ")}`);
+      if (itemExtras.length) throw new Error(`${itemPath} 包含未定义字段：${itemExtras.join(", ")}`);
+      expectKeys.forEach((k) => {
+        const typeRule = schema[k];
+        const value = item[k];
+        if (typeRule === "string" && typeof value !== "string") {
+          throw new Error(`${itemPath}.${k} 必须是字符串`);
+        }
+        if (typeRule === "number" && typeof value !== "number") {
+          throw new Error(`${itemPath}.${k} 必须是数字`);
+        }
+        if (typeRule === "string[]") {
+          if (!Array.isArray(value) || value.some((v) => typeof v !== "string")) {
+            throw new Error(`${itemPath}.${k} 必须是字符串数组`);
+          }
+        }
+      });
+    });
+  });
+}
+
+function setKbAssetsEditing(editing) {
+  state.kbAssetsEditing = Boolean(editing);
+  if (el.btnEditKbAssets) {
+    if (state.kbAssetsSaving) {
+      el.btnEditKbAssets.textContent = "保存中…";
+    } else {
+      el.btnEditKbAssets.textContent = state.kbAssetsEditing ? "保存" : "编辑";
+    }
+    el.btnEditKbAssets.disabled = state.kbAssetsSaving;
+  }
+  if (el.kbAssetsView) el.kbAssetsView.hidden = state.kbAssetsEditing;
+  if (el.kbAssetsEditor) el.kbAssetsEditor.hidden = !state.kbAssetsEditing;
+  if (!state.kbAssetsEditing) {
+    setKbAssetsEditError("");
+  }
+}
+
+async function onEditOrSaveKbAssets() {
+  if (state.kbAssetsSaving) {
+    return;
+  }
+  if (!state.kbAssetsEditing) {
+    if (!state.kbAssetsLastLoadedAssets) {
+      setStatus("请先加载知识摘要");
+      return;
+    }
+    const editable = editableKbAssetsFromSource(state.kbAssetsLastLoadedAssets);
+    if (el.kbAssetsEditor) {
+      el.kbAssetsEditor.value = JSON.stringify(editable, null, 2);
+      resetModalContentScrollToTop(el.kbAssetsEditor);
+    }
+    setKbAssetsEditError("");
+    setKbAssetsEditing(true);
+    return;
+  }
+
+  const kbId = state.kbAssetsCurrentKbId || (el.kbAssetsKbSelect && el.kbAssetsKbSelect.value);
+  if (!kbId) {
+    setStatus("未选择知识集");
+    return;
+  }
+
+  try {
+    const text = (el.kbAssetsEditor && el.kbAssetsEditor.value) || "";
+    const parsed = JSON.parse(text);
+    validateKbAssetsPayload(parsed);
+    setKbAssetsEditError("");
+    state.kbAssetsSaving = true;
+    setKbAssetsEditing(true);
+    setStatus("保存知识摘要中…");
+    const saved = await api.put(`/knowledge-bases/${kbId}/assets/summary`, { assets: parsed });
+    state.kbAssetsLastLoadedAssets = saved.assets || parsed;
+    if (el.kbAssetsView) {
+      el.kbAssetsView.textContent = JSON.stringify(state.kbAssetsLastLoadedAssets, null, 2);
+    }
+    setKbAssetsEditing(false);
+    setStatus("知识摘要已保存");
+  } catch (e) {
+    const msg = e && e.message ? e.message : String(e);
+    setKbAssetsEditError(msg);
+    setStatus(`保存失败：${msg}`);
+  } finally {
+    state.kbAssetsSaving = false;
+    setKbAssetsEditing(state.kbAssetsEditing);
+  }
+}
+
 function closeKbAssetsModal() {
   if (!el.kbAssetsModal) return;
+  if (state.kbAssetsEditing && !window.confirm("存在未保存修改，确定关闭并丢弃吗？")) {
+    return;
+  }
+  setKbAssetsEditing(false);
   el.kbAssetsModal.hidden = true;
 }
 
@@ -500,6 +675,10 @@ const state = {
   /** 用于防止 openChapter 的请求乱序覆盖 UI */
   openChapterRequestSeq: 0,
   knowledgeBases: [],
+  kbAssetsCurrentKbId: "",
+  kbAssetsLastLoadedAssets: null,
+  kbAssetsEditing: false,
+  kbAssetsSaving: false,
   /** 与后端 PATCH 知识库绑定限制一致：已有结构化/文本大纲后不可改 */
   currentProjectKbBindLocked: false,
   /** @type {string[]} */
@@ -577,7 +756,10 @@ const el = {
   kbAssetsKbSelect: document.getElementById("kb-assets-kb-select"),
   btnLoadKbAssets: document.getElementById("btn-load-kb-assets"),
   kbAssetsView: document.getElementById("kb-assets-view"),
+  kbAssetsEditor: document.getElementById("kb-assets-editor"),
+  kbAssetsEditError: document.getElementById("kb-assets-edit-error"),
   kbAssetsModal: document.getElementById("kb-assets-modal"),
+  btnEditKbAssets: document.getElementById("btn-edit-kb-assets"),
   btnCloseKbAssetsModal: document.getElementById("btn-close-kb-assets-modal"),
   projectContextMenu: document.getElementById("project-context-menu"),
   projectRenameModal: document.getElementById("project-rename-modal"),
@@ -2140,6 +2322,7 @@ function bindEvents() {
   bindClick(el.btnCloseKbModal, closeKnowledgeBaseModal);
   bindClick(el.btnCreateKb, createKnowledgeBase);
   bindClick(el.btnLoadKbAssets, loadKbAssetsSummary);
+  bindClick(el.btnEditKbAssets, onEditOrSaveKbAssets);
   bindClick(el.btnCloseKbAssetsModal, closeKbAssetsModal);
   bindClick(el.btnProjectRenameConfirm, confirmRenameProject);
   bindClick(el.btnProjectRenameCancel, closeRenameModal);

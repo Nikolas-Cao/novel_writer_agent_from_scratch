@@ -1412,6 +1412,35 @@ button:disabled {
   padding: 14px;
 }
 
+.kb-assets-head-actions {
+  margin-left: auto;
+  margin-right: 8px;
+}
+
+.kb-assets-editor {
+  margin-top: 8px;
+  width: 100%;
+  min-height: min(68vh, 760px);
+  max-height: min(72vh, 820px);
+  overflow: auto;
+  box-sizing: border-box;
+  font-size: 15px;
+  line-height: 1.65;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 16px;
+  resize: vertical;
+}
+
+.kb-assets-edit-error {
+  margin-top: 8px;
+  color: #b91c1c;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .kb-modal-section {
   border: 1px solid #e5e7eb;
   border-radius: 12px;

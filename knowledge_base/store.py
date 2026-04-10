@@ -175,6 +175,10 @@ class KnowledgeBaseStore:
         """兼容旧版单文件 layers.json。"""
         return self.kb_dir(kb_id) / "assets" / "layers.json"
 
+    def user_edited_assets_path(self, kb_id: str) -> Path:
+        """用户手工编辑后的整库摘要文件。"""
+        return self.kb_dir(kb_id) / "assets" / "user_edited_layers.json"
+
     def assets_doc_path(self, kb_id: str, doc_id: str) -> Path:
         return self.kb_dir(kb_id) / "assets" / f"layers_{doc_id}.json"
 
@@ -185,29 +189,24 @@ class KnowledgeBaseStore:
         return sorted(d.glob("layers_*.json"))
 
     def load_assets(self, kb_id: str) -> Dict[str, Any]:
-        """优先合并所有按文档的 layers_*.json；否则回退 layers.json。"""
+        """优先读取用户手工编辑摘要；否则按文档合并或回退旧版单文件。"""
+        user_path = self.user_edited_assets_path(kb_id)
+        if user_path.exists():
+            try:
+                return self._normalize_assets_payload(json.loads(user_path.read_text(encoding="utf-8")))
+            except (json.JSONDecodeError, OSError):
+                # 仅在手工覆盖文件损坏时回退自动构建资产，避免写作链路被单点文件阻断。
+                pass
         paths = self.list_asset_layer_paths(kb_id)
         if paths:
             merged = self._merge_asset_files(paths)
             merged["status"] = merged.get("status") or "ready"
-            return merged
+            return self._normalize_assets_payload(merged)
         p = self.assets_path(kb_id)
         if not p.exists():
-            return {
-                "characters": [],
-                "timeline": [],
-                "world_rules": [],
-                "core_facts": [],
-                "leaf_summaries": [],
-                "section_summaries": [],
-                "global_summary": "",
-                "status": "none",
-                "by_doc": {},
-            }
+            return self._normalize_assets_payload({"status": "none"})
         try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-            data.setdefault("by_doc", {})
-            return data
+            return self._normalize_assets_payload(json.loads(p.read_text(encoding="utf-8")))
         except (json.JSONDecodeError, OSError):
             return {"status": "invalid"}
 
@@ -258,4 +257,26 @@ class KnowledgeBaseStore:
         self.ensure_kb_dir(kb_id)
         p = self.assets_doc_path(kb_id, doc_id)
         p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def save_user_edited_assets(self, kb_id: str, data: Dict[str, Any]) -> None:
+        self.ensure_kb_dir(kb_id)
+        p = self.user_edited_assets_path(kb_id)
+        payload = self._normalize_assets_payload(data)
+        payload["status"] = "ready"
+        payload["by_doc"] = {}
+        p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _normalize_assets_payload(data: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = dict(data or {})
+        normalized.setdefault("characters", [])
+        normalized.setdefault("timeline", [])
+        normalized.setdefault("world_rules", [])
+        normalized.setdefault("core_facts", [])
+        normalized.setdefault("leaf_summaries", [])
+        normalized.setdefault("section_summaries", [])
+        normalized.setdefault("global_summary", "")
+        normalized.setdefault("status", "ready")
+        normalized.setdefault("by_doc", {})
+        return normalized
 
