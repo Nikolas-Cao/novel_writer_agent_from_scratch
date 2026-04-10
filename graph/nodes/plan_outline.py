@@ -12,7 +12,6 @@ import os
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
-from config import DEBUG
 logger = logging.getLogger(__name__)
 
 from graph.llm import create_planner_llm
@@ -329,8 +328,7 @@ async def plan_outline_node(
     run_target = max(1, min(run_target, total_chapters))
     run_state = {**state, "total_chapters": run_target}
 
-    # 调试模式(debug_mode)优先走一次性大纲，避免骨架+扩窗的多阶段调用干扰问题定位。
-    if DEBUG or run_target <= PLAN_OUTLINE_SINGLE_CALL_MAX:
+    if run_target <= PLAN_OUTLINE_SINGLE_CALL_MAX:
         s1 = await outline_short_node(run_state, llm=llm, kb_context=kb_context, target_chapters=run_target)
         merged = {**run_state, **s1}
     else:

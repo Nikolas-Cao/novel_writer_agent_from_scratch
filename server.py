@@ -892,6 +892,7 @@ def create_app(
             "project_id": project_id,
             "nickname": state.get("nickname"),
             "instruction": state.get("instruction", ""),
+            "plot_ideas": state.get("plot_ideas") or [],
             "style_constraint": state.get("style_constraint", ""),
             "selected_plot_summary": state.get("selected_plot_summary", ""),
             "outline_structure": state.get("outline_structure", {"volumes": []}),

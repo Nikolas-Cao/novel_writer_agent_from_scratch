@@ -6,6 +6,12 @@
   display: none !important;
 }
 
+html,
+body {
+  min-width: 1200px;
+  min-height: 760px;
+}
+
 body {
   margin: 0;
   font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -14,6 +20,7 @@ body {
     radial-gradient(circle at 92% 100%, rgba(14, 165, 233, 0.14), transparent 28%),
     #f4f7ff;
   color: #0f172a;
+  overflow: auto;
 }
 
 .topbar {
@@ -67,7 +74,7 @@ body {
 
 .layout {
   display: grid;
-  grid-template-columns: 1fr 1fr 1.25fr;
+  grid-template-columns: 360px minmax(300px, 1fr) minmax(420px, 1.25fr);
   gap: 14px;
   padding: 14px;
   align-items: start;
@@ -641,7 +648,9 @@ button:disabled:active {
   flex-direction: column;
   height: calc(100vh - 132px);
   max-height: calc(100vh - 132px);
-  overflow: hidden;
+  overflow-y: auto;
+  min-height: 520px;
+  scrollbar-gutter: stable;
 }
 
 .panel-detail {
@@ -651,6 +660,7 @@ button:disabled:active {
   height: calc(100vh - 132px);
   max-height: calc(100vh - 132px);
   overflow-y: auto;
+  min-height: 520px;
   scrollbar-gutter: stable;
 }
 

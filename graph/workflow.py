@@ -6,7 +6,6 @@
 import asyncio
 from typing import Any, Optional, Tuple
 
-from config import DEBUG
 from langgraph.graph import END, StateGraph
 
 from graph.nodes import (
@@ -34,8 +33,6 @@ def _route_outline_mode(state: NovelProjectState) -> str:
     total = int(state.get("total_chapters", 0) or 0) or 12
     from graph.nodes.plan_outline import PLAN_OUTLINE_SINGLE_CALL_MAX
 
-    if DEBUG:
-        return "outline_short"
     return "outline_short" if total <= PLAN_OUTLINE_SINGLE_CALL_MAX else "outline_skeleton_lite"
 
 

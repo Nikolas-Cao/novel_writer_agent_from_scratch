@@ -496,6 +496,7 @@ const state = {
   pendingDeleteProjectId: null,
   expandedEventIndex: null,
   styleConstraint: "",
+  currentProjectProgress: "intent_only",
 };
 
 const el = {
@@ -781,6 +782,26 @@ function hasOutlineData(projectData) {
   return hasOutlineVolumes || hasOutlineText || hasChapters;
 }
 
+function deriveProjectProgress(projectData) {
+  const hasIntent = String((projectData && projectData.instruction) || "").trim().length > 0;
+  const hasIdeas = Array.isArray(projectData && projectData.plot_ideas) && projectData.plot_ideas.length > 0;
+  const hasSelectedSummary = String((projectData && projectData.selected_plot_summary) || "").trim().length > 0;
+  const hasOutline = hasOutlineData(projectData);
+  if (hasSelectedSummary || hasOutline) return "outlined_or_writing";
+  if (hasIdeas) return "ideas_ready";
+  if (hasIntent) return "intent_only";
+  return "intent_only";
+}
+
+function shouldHideCreatePanelForProgress(progress) {
+  return progress === "outlined_or_writing";
+}
+
+function shouldShowPlotIdeasForProgress(progress, ideasCount) {
+  if (progress === "outlined_or_writing") return false;
+  return Number(ideasCount) > 0;
+}
+
 /** 与 server._project_has_outline 对齐：仅大纲存在时锁定知识库绑定（不因仅有章节而锁定）。 */
 function projectHasOutlineForKbLock(projectData) {
   const volumes =
@@ -796,7 +817,8 @@ function projectHasOutlineForKbLock(projectData) {
 
 function updateCreatePanelVisibility(projectData) {
   if (!el.panelCreate) return;
-  const shouldHide = hasOutlineData(projectData);
+  const progress = deriveProjectProgress(projectData);
+  const shouldHide = shouldHideCreatePanelForProgress(progress);
   el.panelCreate.hidden = shouldHide;
   if (el.layout) {
     el.layout.classList.toggle("is-create-hidden", shouldHide);
@@ -805,7 +827,8 @@ function updateCreatePanelVisibility(projectData) {
 
 function updateDetailLayout(projectData) {
   if (!el.panelDetail) return;
-  el.panelDetail.classList.toggle("has-outline", hasOutlineData(projectData));
+  const progress = deriveProjectProgress(projectData);
+  el.panelDetail.classList.toggle("has-outline", progress === "outlined_or_writing");
 }
 
 function setDetailPanelVisibility(visible) {
@@ -1182,7 +1205,8 @@ async function openProject(projectId) {
   setStatus(`打开项目 ${projectId} ...`);
   try {
     const p = await api.get(`/projects/${projectId}`);
-    const showDetail = hasOutlineData(p);
+    state.currentProjectProgress = deriveProjectProgress(p);
+    const showDetail = state.currentProjectProgress === "outlined_or_writing";
     const chapters = p.chapters || [];
     state.chapterMetas = chapters;
     const generatedCount = chapters.length;
@@ -1199,6 +1223,19 @@ async function openProject(projectId) {
     setDetailPanelVisibility(showDetail);
     state.currentChapterIndex = resolvedCurrentIndex;
     state.selectedChapterIndex = null;
+    if (el.instruction) {
+      el.instruction.value = String((p && p.instruction) || "");
+    }
+    if (el.customSummary) {
+      el.customSummary.value = "";
+    }
+    const ideas = Array.isArray(p.plot_ideas) ? p.plot_ideas : [];
+    const selectedSummary = String((p && p.selected_plot_summary) || "").trim();
+    state.selectedIdea = ideas.includes(selectedSummary) ? selectedSummary : "";
+    if (el.customSummary && selectedSummary && !state.selectedIdea) {
+      el.customSummary.value = selectedSummary;
+    }
+    renderPlotIdeas(ideas);
     updateChapterActionButtons();
     if (el.totalChapters && Number.isFinite(p.total_chapters)) {
       el.totalChapters.value = String(p.total_chapters);
@@ -1248,6 +1285,7 @@ async function openProject(projectId) {
     }
   } catch (e) {
     state.currentChapterIndex = null;
+    state.currentProjectProgress = "intent_only";
     state.currentProjectKbBindLocked = false;
     state.currentProjectKbIds = [];
     state.outlineGeneratedUntil = -1;
@@ -1366,6 +1404,7 @@ async function confirmDeleteProject() {
 
 async function refreshProjectsAndHideDetail() {
   state.currentProjectId = null;
+  state.currentProjectProgress = "intent_only";
   state.currentChapterIndex = null;
   state.selectedChapterIndex = null;
   state.chapterMetas = [];
@@ -1381,6 +1420,7 @@ async function refreshProjectsAndHideDetail() {
 
 function startNewProject() {
   state.currentProjectId = null;
+  state.currentProjectProgress = "intent_only";
   state.currentChapterIndex = null;
   state.selectedChapterIndex = null;
   state.chapterMetas = [];
@@ -1403,7 +1443,7 @@ function startNewProject() {
 
 function renderPlotIdeas(ideas) {
   state.plotIdeas = ideas || [];
-  setPlotIdeasSectionVisibility(state.plotIdeas.length > 0);
+  setPlotIdeasSectionVisibility(shouldShowPlotIdeasForProgress(state.currentProjectProgress, state.plotIdeas.length));
   if (
     state.expandedIdeaIndex !== null &&
     (state.expandedIdeaIndex < 0 || state.expandedIdeaIndex >= state.plotIdeas.length)
@@ -1768,8 +1808,11 @@ async function generateIdeas() {
       }
       state.currentProjectId = pid;
     }
+    // 每次重新生成概要都先清空旧候选，避免用户在请求期间误用历史候选。
+    state.plotIdeas = [];
     state.selectedIdea = "";
     state.expandedIdeaIndex = null;
+    renderPlotIdeas([]);
     setStatus("生成概要中...");
     const ideas = await postNdjsonStream(
       `/projects/${state.currentProjectId}/plot-ideas`,
