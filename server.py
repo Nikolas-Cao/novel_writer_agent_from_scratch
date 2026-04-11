@@ -639,12 +639,52 @@ def create_app(
         overlay = head_overlay_store.load(project_id)
         if not overlay:
             return
+        overlay_idx = _safe_int(overlay.get("chapter_index"), default=-1)
+        latest_idx = latest_chapter_index(state)
+        if latest_idx is None or overlay_idx != int(latest_idx):
+            head_overlay_store.clear(project_id)
+            return
         merged = _apply_head_overlay_view(state, overlay)
         state.update(merged)
+        delta_nodes = [
+            dict(x)
+            for x in (overlay.get("character_graph_delta_nodes") or [])
+            if isinstance(x, dict)
+        ]
+        delta_edges = [
+            dict(x)
+            for x in (overlay.get("character_graph_delta_edges") or [])
+            if isinstance(x, dict)
+        ]
+        base_chapter_index = _safe_int(
+            overlay.get("character_graph_base_chapter_index"),
+            default=overlay_idx - 1,
+        )
+        if overlay_idx >= 0 and (delta_nodes or delta_edges):
+            if base_chapter_index < 0:
+                base_graph = {"nodes": [], "edges": []}
+            else:
+                base_graph = graph_store.load_for_chapter(project_id, base_chapter_index)
+            merged_graph = graph_store.merge(
+                project_id,
+                delta_nodes,
+                delta_edges,
+                chapter_index=overlay_idx,
+                base_graph=base_graph,
+            )
+            state["character_graph"] = merged_graph
         head_overlay_store.clear(project_id)
 
     def _clear_head_overlay(project_id: str) -> None:
         head_overlay_store.clear(project_id)
+
+    def _clear_head_overlay_if_after(project_id: str, max_chapter_index: int) -> None:
+        overlay = head_overlay_store.load(project_id)
+        if not isinstance(overlay, dict):
+            return
+        overlay_idx = _safe_int(overlay.get("chapter_index"), default=-1)
+        if overlay_idx > int(max_chapter_index):
+            head_overlay_store.clear(project_id)
 
     def _stage_head_overlay_from_post_result(state: Dict[str, Any], post_out: Dict[str, Any]) -> None:
         current_idx = _safe_int(state.get("current_chapter_index"), default=0)
@@ -660,6 +700,16 @@ def create_app(
             "last_chapter_summary": str(post_out.get("last_chapter_summary") or "").strip(),
             "canon_overrides_delta": delta,
             "character_graph": dict(post_out.get("character_graph") or {}),
+            "character_graph_delta_nodes": [
+                dict(x) for x in (post_out.get("character_graph_delta_nodes") or []) if isinstance(x, dict)
+            ],
+            "character_graph_delta_edges": [
+                dict(x) for x in (post_out.get("character_graph_delta_edges") or []) if isinstance(x, dict)
+            ],
+            "character_graph_base_chapter_index": _safe_int(
+                post_out.get("character_graph_base_chapter_index"),
+                default=current_idx - 1,
+            ),
         }
         chapters = [dict(x) for x in (state.get("chapters") or [])]
         for item in chapters:
@@ -708,6 +758,23 @@ def create_app(
         checkpointer.save_state(project_id, state)
         if isinstance(overlay_payload, dict):
             head_overlay_store.save(project_id, overlay_payload)
+
+    def _overlay_graph_for_latest(project_id: str, state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        overlay = head_overlay_store.load(project_id)
+        if not isinstance(overlay, dict):
+            return None
+        latest_idx = latest_chapter_index(state)
+        if latest_idx is None:
+            return None
+        if _safe_int(overlay.get("chapter_index"), default=-1) != int(latest_idx):
+            return None
+        graph = overlay.get("character_graph")
+        if not isinstance(graph, dict):
+            return None
+        return {
+            "chapter_index": int(latest_idx),
+            "character_graph": graph,
+        }
 
     def _outline_lock(project_id: str) -> asyncio.Lock:
         lock = _outline_project_locks.get(project_id)
@@ -1107,6 +1174,7 @@ def create_app(
                 chapter_store=chapter_store,
                 rag_indexer=rag_indexer,
                 graph_store=graph_store,
+                persist_graph=False,
             )
             _stage_head_overlay_from_post_result(state, out)
             logger.info("[%s] pipeline_done project=%s chapter_index=%s", scene, pid, ch_idx)
@@ -1582,7 +1650,12 @@ def create_app(
         state = load_state(project_id)
         if chapter_index is None:
             latest_idx = latest_chapter_index(state)
-            graph = graph_store.load_for_chapter(project_id, latest_idx if latest_idx is not None else -1)
+            overlay_view = _overlay_graph_for_latest(project_id, state)
+            if overlay_view:
+                return overlay_view
+            if latest_idx is None:
+                return {"chapter_index": None, "character_graph": {"nodes": [], "edges": []}}
+            graph = graph_store.load_for_chapter(project_id, latest_idx)
             return {"chapter_index": latest_idx, "character_graph": graph}
         try:
             graph = graph_store.load_for_chapter(project_id, int(chapter_index))
@@ -1749,6 +1822,7 @@ def create_app(
 
         to_delete = [item for item in chapters if int(item.get("index", -1)) > keep_to]
         if not to_delete:
+            _clear_head_overlay_if_after(project_id, keep_to)
             return {
                 "kept_until": keep_to,
                 "deleted_count": 0,
@@ -1779,7 +1853,7 @@ def create_app(
         rag_indexer.delete_chapter_summaries_from(project_id, keep_to + 1)
         graph_store.delete_snapshots_from(project_id, keep_to + 1)
         graph_store.refresh_legacy_latest(project_id)
-        _clear_head_overlay(project_id)
+        _clear_head_overlay_if_after(project_id, keep_to)
         state["character_graph"] = graph_store.load_for_chapter(project_id, keep_to)
         save_state(project_id, state)
         return {
@@ -1876,6 +1950,7 @@ def create_app(
                     chapter_store=chapter_store,
                     rag_indexer=rag_indexer,
                     graph_store=graph_store,
+                    persist_graph=False,
                 )
                 _stage_head_overlay_from_post_result(state, out)
             except Exception as exc:

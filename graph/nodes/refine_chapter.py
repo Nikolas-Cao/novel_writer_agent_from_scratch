@@ -11,7 +11,6 @@ from graph.chapter_prompt_defaults import (
     DEFAULT_CHAPTER_ENDING_RULES,
     DEFAULT_REFINE_CHAPTER_ENDING_EXTRA,
 )
-from graph.knowledge_context import format_canon_overrides
 from graph.llm import create_writer_llm
 from graph.utils import get_message_text, sanitize_chapter_markdown
 from state import NovelProjectState
@@ -47,39 +46,34 @@ async def refine_chapter_node(
     if not draft:
         raise ValueError("No chapter draft found for refinement.")
 
-    guard = ""
-    ov = format_canon_overrides(state.get("canon_overrides"))
-    if ov.strip():
-        guard += ov + "\n\n"
-    kb_a = (state.get("kb_assets_text") or "").strip()
-    if kb_a:
-        guard += (
-            "【一致性】若正文与「二创设定覆盖」冲突，以保持二创为准；"
-            "知识库摘要仅用于校验称谓/设定一致性，勿用原著覆盖已写二创情节。\n"
-            f"【知识库摘要（节选）】\n{kb_a[:4000]}\n\n"
-        )
     style_constraint = str(state.get("style_constraint") or "").strip()
     style_constraint_block = ""
     if style_constraint:
         style_constraint_block = (
             "【文风约束】\n"
             f"{style_constraint}\n"
-            "请严格遵守上述文风约束，同时不得与既有剧情事实冲突。\n\n"
+            "请只在措辞与表达层面体现该风格，不改变剧情事实。\n\n"
         )
 
     prompt = (
-        "你是小说编辑，请润色以下章节。\n"
-        "要求：\n"
-        "1) 保持 Markdown 格式；\n"
-        "2) 修复语病并增强文学性；\n"
-        "3) 不改变核心剧情与章节结构；\n"
-        "4) 仅输出润色后的章节正文，禁止输出“核心亮点/说明/总结/点评”；\n"
+        "你是小说润色编辑。请仅对“待润色正文”做语言层优化，不做剧情改写。\n\n"
+        "【润色目标】\n"
+        "1) 改善用词、句式、节奏与可读性，修复语病与重复表达；\n"
+        "2) 在不改事件的前提下，适度增强场景细节与人物心理描写；\n"
+        "3) 保留原有章节结构与情节推进顺序。\n\n"
+        "【硬性约束】\n"
+        "1) 不新增、不删除、不改写关键剧情事实（人物关系、时间地点、事件结果、对话含义）；\n"
+        "2) 不引入全书层面的设定解释、总结或一致性说明；\n"
+        "3) 仅输出润色后的章节正文，保持 Markdown；\n"
+        "4) 禁止输出“核心亮点/说明/总结/点评”；\n"
         "5) 禁止输出 Markdown 代码围栏（不要出现 ```markdown 或 ```）。\n\n"
         f"{DEFAULT_CHAPTER_ENDING_RULES}\n\n"
         f"{DEFAULT_REFINE_CHAPTER_ENDING_EXTRA}\n\n"
-        f"{guard}"
         f"{style_constraint_block}"
-        f"{draft}"
+        "【待润色正文（唯一输入）】\n"
+        "<<CHAPTER_DRAFT_BEGIN>>\n"
+        f"{draft}\n"
+        "<<CHAPTER_DRAFT_END>>"
     )
     t0 = time.monotonic()
     logger.info("[refine_chapter] llm_invoke_begin project=%s chapter_index=%s", project_id, current_idx)

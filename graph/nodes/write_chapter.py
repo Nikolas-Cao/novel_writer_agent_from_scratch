@@ -113,7 +113,10 @@ async def write_chapter_node(
 
     # 角色上下文使用“上一章快照”，避免未来章节信息泄漏到当前章生成。
     # 只使用最近 N 章内出现的关系，再取前 8 节点、12 边。
-    char_graph = cgraph_store.load_for_chapter(project_id, current_idx - 1)
+    if current_idx <= 0:
+        char_graph = {"nodes": [], "edges": []}
+    else:
+        char_graph = cgraph_store.load_for_chapter(project_id, current_idx - 1)
     all_edges = list(char_graph.get("edges", []))
     all_nodes = list(char_graph.get("nodes", []))
     window_start = max(0, current_idx - CHARACTER_GRAPH_RECENT_CHAPTERS)

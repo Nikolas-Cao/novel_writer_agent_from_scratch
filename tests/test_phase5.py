@@ -2,6 +2,7 @@
 阶段 5 验收测试：FastAPI 接口流程。
 运行：py tests/test_phase5.py  或  py -m pytest tests/test_phase5.py -v
 """
+import asyncio
 import json
 import re
 import shutil
@@ -106,6 +107,11 @@ class ApiPlannerLLM:
             return _Resp(
                 '{"nodes":[{"id":"hero","name":"主角"}],'
                 '"edges":[{"from_id":"hero","to_id":"case","relation":"调查"}]}'
+            )
+        if "new_overrides" in prompt:
+            # 故意返回错误章号，验证后端会强制矫正为 current_chapter_index。
+            return _Resp(
+                '{"new_overrides":[{"subject":"测试设定","original_fact":"A","fanfic_fact":"B","effective_from_chapter":999}]}'
             )
         if "200-500" in prompt and "摘要" in prompt:
             return _Resp("本章摘要：案件推进，悬疑增强。")
@@ -425,18 +431,26 @@ def test_head_overlay_isolation_and_commit():
 
     state_path = root / "states" / f"{project_id}.json"
     overlay_path = root / "projects" / project_id / "chapter_head_overlay.json"
+    graph_snapshot_0 = root / "projects" / project_id / "character_graph" / "000.json"
+    graph_snapshot_1 = root / "projects" / project_id / "character_graph" / "001.json"
+    graph_legacy = root / "projects" / project_id / "character_graph.json"
     assert overlay_path.exists()
+    assert not graph_snapshot_0.exists()
+    assert not graph_legacy.exists()
 
     saved_state = json.loads(state_path.read_text(encoding="utf-8"))
     ch0 = next((c for c in saved_state.get("chapters", []) if int(c.get("index", -1)) == 0), None)
     assert ch0 is not None
     assert not str(ch0.get("summary") or "").strip()
-
     r = client.get(f"/projects/{project_id}")
     assert r.status_code == 200
     ch0_view = next((c for c in r.json().get("chapters", []) if int(c.get("index", -1)) == 0), None)
     assert ch0_view is not None
     assert "本章摘要" in str(ch0_view.get("summary") or "")
+    r = client.get(f"/projects/{project_id}/character-graph")
+    assert r.status_code == 200
+    assert r.json().get("chapter_index") == 0
+    assert len((r.json().get("character_graph") or {}).get("edges", [])) >= 1
 
     polluted_overlay = {
         "chapter_index": 0,
@@ -461,6 +475,8 @@ def test_head_overlay_isolation_and_commit():
     assert all("污染设定XYZ" not in p for p in writer.prompts)
     refreshed_overlay = json.loads(overlay_path.read_text(encoding="utf-8"))
     assert "污染设定XYZ" not in json.dumps(refreshed_overlay, ensure_ascii=False)
+    assert not graph_snapshot_0.exists()
+    assert not graph_legacy.exists()
 
     r = client.post(f"/projects/{project_id}/chapters/next", json={})
     assert r.status_code == 200
@@ -472,8 +488,45 @@ def test_head_overlay_isolation_and_commit():
     assert "本章摘要" in str(ch0.get("summary") or "")
     overlay_after_next = json.loads(overlay_path.read_text(encoding="utf-8"))
     assert int(overlay_after_next.get("chapter_index", -1)) == 1
+    assert graph_snapshot_0.exists()
+    assert graph_legacy.exists()
+    assert not graph_snapshot_1.exists()
+
+    r = client.get(f"/projects/{project_id}/character-graph", params={"chapter_index": 0})
+    assert r.status_code == 200
+    assert r.json().get("chapter_index") == 0
+    assert len((r.json().get("character_graph") or {}).get("edges", [])) >= 1
 
     shutil.rmtree(root, ignore_errors=True)
+
+
+def test_post_chapter_override_effective_chapter_forced_current():
+    from graph.nodes.post_chapter import post_chapter_node
+
+    class _NoopRagIndexer:
+        def add_chapter_summary(self, project_id: str, chapter_index: int, summary: str) -> None:
+            return None
+
+    state = {
+        "project_id": "p-test-override-normalize",
+        "current_chapter_index": 0,
+        "current_chapter_final": "# 第一章\n\n测试正文。",
+        "chapters": [{"index": 0, "title": "第一章", "summary": ""}],
+        "kb_enabled": True,
+        "canon_overrides": [],
+        "consistency_report": [],
+    }
+    out = asyncio.run(
+        post_chapter_node(
+            state,
+            llm=ApiPlannerLLM(),
+            rag_indexer=_NoopRagIndexer(),
+        )
+    )
+    overrides = list(out.get("canon_overrides") or [])
+    assert overrides
+    assert any(str(x.get("subject") or "") == "测试设定" for x in overrides)
+    assert all(int(x.get("effective_from_chapter", -1)) == 0 for x in overrides)
 
 
 def run_all():
@@ -481,6 +534,7 @@ def run_all():
     test_phase5_outline_multi_phase_api()
     test_phase5_extend_failure_not_persisted()
     test_style_constraint_persist_and_apply_in_api()
+    test_post_chapter_override_effective_chapter_forced_current()
     test_head_overlay_isolation_and_commit()
     print("Phase 5 acceptance: all passed.")
 

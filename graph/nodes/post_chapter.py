@@ -30,12 +30,47 @@ def _fallback_extract_characters(text: str) -> List[CharacterNode]:
     return out
 
 
+def _merge_graphs_in_memory(
+    base_graph: Dict[str, Any],
+    new_nodes: List[CharacterNode],
+    new_edges: List[CharacterEdge],
+) -> Dict[str, Any]:
+    nodes_by_id = {
+        str(node.get("id")): dict(node)
+        for node in list(base_graph.get("nodes", []))
+        if node.get("id") is not None
+    }
+    for node in new_nodes:
+        node_id = node.get("id")
+        if not node_id:
+            continue
+        nodes_by_id[str(node_id)] = {**nodes_by_id.get(str(node_id), {}), **dict(node)}
+
+    edge_key = lambda e: (
+        str(e.get("from_id", "")),
+        str(e.get("to_id", "")),
+        str(e.get("relation", "")),
+    )
+    edges_by_key = {edge_key(edge): dict(edge) for edge in list(base_graph.get("edges", []))}
+    for edge in new_edges:
+        key = edge_key(edge)
+        if not key[0] or not key[1]:
+            continue
+        edges_by_key[key] = {**edges_by_key.get(key, {}), **dict(edge)}
+
+    return {
+        "nodes": list(nodes_by_id.values()),
+        "edges": list(edges_by_key.values()),
+    }
+
+
 async def post_chapter_node(
     state: NovelProjectState,
     llm: Optional[Any] = None,
     chapter_store: Optional[ChapterStore] = None,
     rag_indexer: Optional[LocalRagIndexer] = None,
     graph_store: Optional[CharacterGraphStore] = None,
+    persist_graph: bool = True,
 ) -> Dict[str, Any]:
     planner = llm or create_planner_llm()
     store = chapter_store or ChapterStore()
@@ -110,14 +145,21 @@ async def post_chapter_node(
     for e in new_edges:
         e["first_chapter"] = current_idx
 
-    base_graph = cgraph_store.load_for_chapter(project_id, current_idx - 1)
-    merged_graph = cgraph_store.merge(
-        project_id,
-        new_nodes,
-        new_edges,
-        chapter_index=current_idx,
-        base_graph=base_graph,
-    )
+    # current_idx==0 时使用空图作为基线，避免回退到 legacy 聚合图带入历史关系。
+    if current_idx <= 0:
+        base_graph = {"nodes": [], "edges": []}
+    else:
+        base_graph = cgraph_store.load_for_chapter(project_id, current_idx - 1)
+    if persist_graph:
+        merged_graph = cgraph_store.merge(
+            project_id,
+            new_nodes,
+            new_edges,
+            chapter_index=current_idx,
+            base_graph=base_graph,
+        )
+    else:
+        merged_graph = _merge_graphs_in_memory(base_graph, new_nodes, new_edges)
 
     canon_overrides: List[Dict[str, Any]] = list(state.get("canon_overrides") or [])
     consistency_report: List[Dict[str, Any]] = list(state.get("consistency_report") or [])
@@ -143,9 +185,11 @@ async def post_chapter_node(
                 subj = str(item.get("subject") or "").strip()
                 if not subj or subj in seen:
                     continue
-                item["effective_from_chapter"] = int(
-                    item.get("effective_from_chapter", current_idx) or current_idx
-                )
+                # 章节后处理的 override 来源就是“当前章正文”。
+                # 模型偶发会把 effective_from_chapter 误回成其他章号（如 1），
+                # 若不纠正会在 overlay 分章筛选时被误丢弃，表现为“本章 override 未持久化”。
+                # 因此这里强制落为 current_idx，保证语义与数据一致。
+                item["effective_from_chapter"] = int(current_idx)
                 canon_overrides.append(item)
                 seen.add(subj)
         except Exception as exc:
@@ -157,6 +201,9 @@ async def post_chapter_node(
         "character_graph": merged_graph,
         "canon_overrides": canon_overrides,
         "consistency_report": consistency_report,
+        "character_graph_delta_nodes": list(new_nodes),
+        "character_graph_delta_edges": list(new_edges),
+        "character_graph_base_chapter_index": int(current_idx - 1),
     }
 
 
