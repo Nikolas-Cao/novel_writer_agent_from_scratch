@@ -75,6 +75,14 @@ test.describe("生成概要 / 项目创建交互", () => {
         });
         return;
       }
+      if (method === "PATCH" && path.endsWith("/knowledge-bases")) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ project_id: "p-stub-regenerate-ideas", selected_kb_ids: [], kb_enabled: false }),
+        });
+        return;
+      }
       if (method === "POST" && path.endsWith("/plot-ideas")) {
         plotIdeasCallCount += 1;
         if (plotIdeasCallCount === 1) {
@@ -159,6 +167,14 @@ test.describe("生成概要 / 项目创建交互", () => {
         });
         return;
       }
+      if (method === "PATCH" && path.endsWith("/knowledge-bases")) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ project_id: "p-stub-reuse", selected_kb_ids: [], kb_enabled: false }),
+        });
+        return;
+      }
       if (method === "POST" && path.endsWith("/plot-ideas")) {
         postPlotIdeasCount += 1;
         await route.fulfill({
@@ -184,6 +200,194 @@ test.describe("生成概要 / 项目创建交互", () => {
 
     expect(postProjectsCount, "POST /projects 应只发生一次").toBe(1);
     expect(postPlotIdeasCount, "POST .../plot-ideas 应发生两次").toBe(2);
+  });
+
+  test("已有项目下勾选参考知识库后生成概要：先 PATCH 绑定再 POST plot-ideas（stub）", async ({ page }) => {
+    const callOrder: string[] = [];
+    const pid = "p-kb-before-ideas";
+    let projectDetail: Record<string, unknown> = {
+      project_id: pid,
+      instruction: "",
+      selected_kb_ids: [] as string[],
+      kb_enabled: false,
+      plot_ideas: [] as string[],
+      selected_plot_summary: "",
+      outline_structure: { volumes: [] },
+      chapters: [],
+      current_chapter_index: 0,
+      total_chapters: 100,
+      chapter_word_target: 3000,
+      enable_chapter_illustrations: false,
+      created_at: 1700000000,
+      token_usage: {},
+    };
+
+    await page.route("**/knowledge-bases", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.fallback();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          knowledge_bases: [{ kb_id: "kb-sync", name: "同步测试库" }],
+        }),
+      });
+    });
+
+    await page.route("**/projects**", async (route) => {
+      const req = route.request();
+      const url = new URL(req.url());
+      const path = url.pathname.replace(/\/$/, "") || "/";
+      const method = req.method();
+
+      if (method === "GET" && path === "/projects") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ projects: [{ project_id: pid, created_at: 1700000000 }] }),
+        });
+        return;
+      }
+      if (method === "GET" && path === `/projects/${pid}`) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(projectDetail),
+        });
+        return;
+      }
+      if (method === "PATCH" && path.endsWith("/knowledge-bases")) {
+        callOrder.push("patch_kb");
+        const body = (req.postDataJSON() as { selected_kb_ids?: string[] }) || {};
+        expect(body.selected_kb_ids).toEqual(["kb-sync"]);
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            project_id: pid,
+            selected_kb_ids: body.selected_kb_ids || [],
+            kb_enabled: true,
+          }),
+        });
+        return;
+      }
+      if (method === "POST" && path.endsWith("/plot-ideas")) {
+        callOrder.push("plot_ideas");
+        projectDetail = {
+          ...projectDetail,
+          plot_ideas: ["stub-after-kb"],
+          instruction: "带知识库的意图",
+        };
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ plot_ideas: ["stub-after-kb"] }),
+        });
+        return;
+      }
+
+      await route.continue();
+    });
+
+    await page.goto("/");
+    await page.locator(`.project-open-btn[data-project-id="${pid}"]`).click();
+    await expect(page.locator("#global-status")).toContainText(`已打开 ${pid}`);
+
+    await page.locator("#btn-open-create-kb-picker").click();
+    await expect(page.locator(".create-kb-card[data-kb-id='kb-sync']")).toBeVisible();
+    await page.locator(".create-kb-card[data-kb-id='kb-sync']").click();
+    await page.locator("#btn-confirm-create-kb-picker").click();
+
+    await page.locator("#instruction-input").fill("带知识库的意图");
+    await page.getByRole("button", { name: "生成概要" }).click();
+    await expect(page.locator("#global-status")).toContainText("概要已生成", { timeout: 15_000 });
+
+    expect(callOrder[0]).toBe("patch_kb");
+    expect(callOrder[1]).toBe("plot_ideas");
+  });
+
+  test("剧情候选卡片：拖选全文后整卡 click 不应销毁选区（stub）", async ({ page }) => {
+    const pid = "p-plot-card-selection";
+    await page.route("**/knowledge-bases", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.fallback();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ knowledge_bases: [] }),
+      });
+    });
+    await page.route("**/projects**", async (route) => {
+      const req = route.request();
+      const url = new URL(req.url());
+      const path = url.pathname.replace(/\/$/, "") || "/";
+      const method = req.method();
+
+      if (method === "GET" && path === "/projects") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ projects: [{ project_id: pid, created_at: 1700000000 }] }),
+        });
+        return;
+      }
+      if (method === "GET" && path === `/projects/${pid}`) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            project_id: pid,
+            instruction: "stub",
+            plot_ideas: ["可复制的剧情概要正文用于校验选区在整卡点击后是否仍存在"],
+            selected_plot_summary: "",
+            outline_structure: { volumes: [] },
+            chapters: [],
+            current_chapter_index: 0,
+            total_chapters: 100,
+            chapter_word_target: 3000,
+            enable_chapter_illustrations: false,
+            created_at: 1700000000,
+            token_usage: {},
+          }),
+        });
+        return;
+      }
+
+      await route.continue();
+    });
+
+    await page.goto("/");
+    await page.locator(`.project-open-btn[data-project-id="${pid}"]`).click();
+    await expect(page.locator("#global-status")).toContainText(`已打开 ${pid}`);
+    await expect(page.locator("#plot-ideas .card")).toHaveCount(1);
+
+    const result = await page.evaluate(() => {
+      const card = document.querySelector("#plot-ideas .card");
+      const body = card && card.querySelector(".card-body");
+      if (!card || !body) return { ok: false as const };
+      const sel = window.getSelection();
+      if (!sel) return { ok: false as const };
+      const range = document.createRange();
+      range.selectNodeContents(body);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      const len = sel.toString().replace(/\s+/g, " ").trim().length;
+      card.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+      const sel2 = window.getSelection();
+      if (!sel2) return { ok: false as const };
+      const afterLen = sel2.toString().replace(/\s+/g, " ").trim().length;
+      return { ok: true as const, len, afterLen, collapsed: sel2.isCollapsed };
+    });
+
+    expect(result.ok, "应能选中候选正文并在整卡 click 后保留选区").toBe(true);
+    if (!result.ok) return;
+    expect(result.len).toBeGreaterThan(0);
+    expect(result.collapsed).toBe(false);
+    expect(result.afterLen).toBe(result.len);
   });
 
   test("生成概要请求未返回期间：「生成大纲」应保持 disabled（延迟 plot-ideas stub）", async ({ page }) => {
@@ -231,6 +435,14 @@ test.describe("生成概要 / 项目创建交互", () => {
           status: 200,
           contentType: "application/json",
           body: JSON.stringify({ project_id: "p-stub-outline-lock" }),
+        });
+        return;
+      }
+      if (method === "PATCH" && path.endsWith("/knowledge-bases")) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ project_id: "p-stub-outline-lock", selected_kb_ids: [], kb_enabled: false }),
         });
         return;
       }
@@ -1589,6 +1801,21 @@ test.describe("知识库入口弹窗化", () => {
         await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ project_id: pid }) });
         return;
       }
+      if (method === "PATCH" && path.endsWith("/knowledge-bases")) {
+        const body = (req.postDataJSON() as { selected_kb_ids?: string[] }) || {};
+        const segs = path.split("/").filter(Boolean);
+        const pid = segs[1] || "p-unknown";
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            project_id: pid,
+            selected_kb_ids: body.selected_kb_ids || [],
+            kb_enabled: Boolean(body.selected_kb_ids && body.selected_kb_ids.length),
+          }),
+        });
+        return;
+      }
       if (method === "POST" && path.endsWith("/plot-ideas")) {
         await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ plot_ideas: ["stub"] }) });
         return;
@@ -1622,7 +1849,8 @@ test.describe("知识库入口弹窗化", () => {
     });
     await page.route("**/knowledge-bases", async (route) => {
       if (route.request().method() !== "GET") {
-        await route.continue();
+        // 交给其它路由（例如 **/projects** 对 PATCH .../knowledge-bases 的桩）；勿用 continue 直送网络。
+        await route.fallback();
         return;
       }
       await route.fulfill({

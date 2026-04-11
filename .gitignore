@@ -30,6 +30,7 @@ checkpoints/
 vector_store/
 tests_tmp/
 projects/
+logs/
 
 ideas.md
 

@@ -23,6 +23,10 @@ from openai import APITimeoutError as OpenAIAPITimeoutError
 from pydantic import BaseModel, Field
 
 from config import CHAPTER_WORD_TARGET, CHECKPOINT_DIR, DEFAULT_TOTAL_CHAPTERS, PROJECTS_ROOT, VECTOR_STORE_DIR
+from logging_setup import configure_app_logging
+
+configure_app_logging()
+
 from graph.llm import TokenTrackingLLM, create_planner_llm, create_writer_llm
 from graph.nodes.generate_plot_ideas import generate_plot_ideas_node
 from graph.nodes.fetch_or_generate_images import fetch_or_generate_images_node

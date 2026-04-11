@@ -54,6 +54,7 @@ copy .env-sample .env
 - `OUTLINE_TRIGGER_MARGIN`：距离已生成大纲边界多少章时触发自动补窗（默认 0）
 - `PROJECTS_ROOT` / `CHECKPOINT_DIR` / `VECTOR_STORE_DIR`：本地落盘根路径（默认分别为仓库下 `projects/`、`checkpoints/`、`vector_store/`）。**章节与人物图谱等在 `projects/{project_id}/`，Chroma 向量库在 `vector_store/{project_id}/`，API 状态 JSON 在 `checkpoints/api_state/{project_id}.json`**，与 `docs/项目实现学习指南.md` 一致。
 - `DEBUG`：设为 `true/1/yes/on` 时，记录每次文本 LLM 调用到 `projects/{project_id}/llm_invoke_results/`。文件名为 `{utc_timestamp}_{status}_{purpose}_{short_id}.json`（`status=success/error`，`purpose` 为细粒度业务目的）。流式调用会在结束后聚合完整输出再写入单个 JSON。
+- **应用日志（Python logging）**：`APP_LOG_DIR`（默认仓库下 `logs/`）、`LOG_FILE_ENABLED`、`LOG_BACKUP_DAYS`（轮转文件保留天数）、`LOG_LEVEL`（如 `INFO`/`DEBUG`）、`LOG_TO_CONSOLE`（默认仅 `DEBUG=true` 时输出到 stderr；与业务事件 `event_logs.ndjson` 不同，见 `logging_setup.py`）。
 - **全局知识库摄取与检索**：`KB_CHUNK_TARGET_CHARS` / `KB_CHUNK_OVERLAP_CHARS` / `KB_INGEST_BATCH_CHUNKS` / `KB_READ_BLOCK_BYTES` / `KB_MAX_CHUNKS_PER_DOCUMENT`；摘要资产 map-reduce：`KB_ASSET_LEAF_BATCH_CHARS` / `KB_ASSET_MAX_LEAF_WINDOWS`；检索：`KB_RETRIEVE_CHROMA_K` / `KB_RETRIEVE_FTS_K` / `KB_RETRIEVE_FINAL_K`；低置信度补查：`KB_TOOL_LOOP_MAX_CALLS`（详见 `config.py`）。
 
 </details>

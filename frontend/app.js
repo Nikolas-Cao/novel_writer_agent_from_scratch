@@ -329,6 +329,7 @@ function renderCreateKbPickerCards() {
     `;
     card.addEventListener("click", () => {
       if (!kbId) return;
+      if (shouldIgnoreCardClickForTextSelection(card)) return;
       const next = new Set(sanitizeCreateKbSelection(state.createKbPickerDraftIds));
       if (next.has(kbId)) {
         next.delete(kbId);
@@ -1167,6 +1168,20 @@ function escapeHtml(text) {
     .replaceAll(">", "&gt;");
 }
 
+/**
+ * 思路：剧情候选卡片、事件日志卡片等「整卡可点」若在 click 时 innerHTML 重建列表，会立刻销毁用户拖选出的 Range，表现为松手后无法复制。
+ * 判定：Selection 非折叠且锚点/焦点任一落在 container 内时，视为复制类拖选，跳过整卡逻辑。
+ */
+function shouldIgnoreCardClickForTextSelection(container) {
+  if (!container || typeof window.getSelection !== "function") return false;
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed) return false;
+  const a = sel.anchorNode;
+  const f = sel.focusNode;
+  if (!a || !f) return false;
+  return container.contains(a) || container.contains(f);
+}
+
 function formatCreatedAt(ts) {
   const n = Number(ts);
   if (!Number.isFinite(n) || n <= 0) return "";
@@ -1753,6 +1768,7 @@ function renderPlotIdeas(ideas) {
     `;
     card.onclick = () => {
       if (state.isGeneratingOutline) return;
+      if (shouldIgnoreCardClickForTextSelection(card)) return;
       state.expandedIdeaIndex = state.expandedIdeaIndex === idx ? null : idx;
       state.selectedIdea = idea;
       renderPlotIdeas(state.plotIdeas);
@@ -1980,6 +1996,7 @@ function renderEventLogs(events) {
       <div class="event-log-card-content">${content || "（无内容）"}</div>
     `;
     card.addEventListener("click", () => {
+      if (shouldIgnoreCardClickForTextSelection(card)) return;
       state.expandedEventIndex = state.expandedEventIndex === idx ? null : idx;
       renderEventLogs(rows);
     });
@@ -2088,6 +2105,15 @@ async function generateIdeas() {
         return;
       }
       state.currentProjectId = pid;
+    }
+    // 生成概要时 LLM 是否带知识库由服务端持久化 state 决定；仅「新建项目」时会把参考知识库写入 state，
+    // 已有项目下在界面勾选知识库后必须再 PATCH，否则服务端仍按未绑定知识库处理。
+    if (state.currentProjectId && !state.currentProjectKbBindLocked) {
+      const kbIds = getSelectedKbIdsForCreate();
+      await api.patch(`/projects/${state.currentProjectId}/knowledge-bases`, {
+        selected_kb_ids: kbIds,
+      });
+      state.currentProjectKbIds = [...kbIds];
     }
     // 每次重新生成概要都先清空旧候选，避免用户在请求期间误用历史候选。
     state.plotIdeas = [];

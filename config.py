@@ -58,6 +58,16 @@ CHECKPOINT_DIR = Path(os.getenv("CHECKPOINT_DIR", str(_project_root / "checkpoin
 VECTOR_STORE_DIR = Path(os.getenv("VECTOR_STORE_DIR", str(_project_root / "vector_store")))
 DEBUG = _env_bool("DEBUG", default=False)
 
+# ----- 应用日志（logging 模块落盘，见 logging_setup.py） -----
+# 默认 logs/，按日轮转：当前写入 app.log，历史为 app.log.YYYY-MM-DD
+APP_LOG_DIR = Path(os.getenv("APP_LOG_DIR", str(_project_root / "logs")))
+LOG_FILE_ENABLED = _env_bool("LOG_FILE_ENABLED", default=True)
+LOG_BACKUP_DAYS = max(1, int(os.getenv("LOG_BACKUP_DAYS", "90")))
+# 例如 DEBUG / INFO / WARNING；未设置时 DEBUG 模式为 DEBUG，否则 INFO
+_LOG_LEVEL_RAW = (os.getenv("LOG_LEVEL") or "").strip().upper()
+LOG_LEVEL_NAME = _LOG_LEVEL_RAW or ("DEBUG" if DEBUG else "INFO")
+LOG_TO_CONSOLE = _env_bool("LOG_TO_CONSOLE", default=DEBUG)
+
 # 目录约定（文档用）：每个项目对应 PROJECTS_ROOT/{project_id}/，
 # 其下可有 chapters/、images/、character_graph.json；
 # 向量库使用 VECTOR_STORE_DIR/{project_id} 或统一库按 project_id 区分 collection。
