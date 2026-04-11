@@ -51,6 +51,100 @@ async function findProjectsWithMinChapters(
 }
 
 test.describe("生成概要 / 项目创建交互", () => {
+  test("大纲阶段未完成时：打开项目应保留生成大纲入口并隐藏详情区", async ({ page }) => {
+    const pid = "p-outline-incomplete";
+    const projectDetail = {
+      project_id: pid,
+      instruction: "测试大纲未完成时入口",
+      plot_ideas: ["候选概要A"],
+      selected_plot_summary: "候选概要A",
+      outline_structure: {
+        volumes: [
+          {
+            volume_title: "第一卷",
+            chapters: [{ title: "第1章", description: "占位", points: [] }],
+          },
+        ],
+      },
+      outline: "",
+      chapters: [],
+      current_chapter_index: 0,
+      total_chapters: 100,
+      outline_generated_until: 9,
+      outline_window_size: 10,
+      chapter_word_target: 3000,
+      enable_chapter_illustrations: false,
+      selected_kb_ids: [],
+      kb_enabled: false,
+      created_at: 1700001000,
+      token_usage: {},
+      outline_checkpoint: {
+        phase: "initial_extend_done",
+        input_fingerprint: "stub-fingerprint",
+        updated_at: 1700001000,
+      },
+      outline_job: {
+        status: "idle",
+        job_id: "",
+        started_at: 0,
+        last_heartbeat_at: 0,
+      },
+    };
+
+    await page.route("**/knowledge-bases", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.fallback();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ knowledge_bases: [] }),
+      });
+    });
+
+    await page.route("**/projects**", async (route) => {
+      const req = route.request();
+      const url = new URL(req.url());
+      const path = url.pathname.replace(/\/$/, "") || "/";
+      const method = req.method();
+
+      if (method === "GET" && path === "/projects") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ projects: [{ project_id: pid, created_at: 1700001000 }] }),
+        });
+        return;
+      }
+
+      if (method === "GET" && path === `/projects/${pid}`) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(projectDetail),
+        });
+        return;
+      }
+
+      await route.continue();
+    });
+
+    await page.goto("/");
+    await page.locator(`.project-open-btn[data-project-id="${pid}"]`).click();
+
+    await expect(page.locator(".panel-create")).toBeVisible();
+    await expect(page.locator("#btn-generate-outline")).toBeVisible();
+    await expect(page.locator("#btn-generate-outline")).toHaveText("继续生成大纲");
+    await expect(page.locator("#btn-generate-outline")).toBeEnabled();
+    await expect(page.locator(".panel-detail")).toBeHidden();
+    await expect(page.locator("#btn-generate-ideas")).toBeDisabled();
+    await expect(page.locator("#btn-open-create-kb-picker")).toBeDisabled();
+    await expect(page.locator("#total-chapters-input")).toBeDisabled();
+    await expect(page.locator("#custom-summary-input")).toBeDisabled();
+    await expect(page.locator("#instruction-input")).toBeDisabled();
+  });
+
   test("已有候选时再次点击生成概要：旧候选应先清空，再展示新候选", async ({ page }) => {
     let plotIdeasCallCount = 0;
     await page.route("**/projects**", async (route) => {

@@ -345,6 +345,10 @@ function renderCreateKbPickerCards() {
 
 function openCreateKbPickerModal() {
   if (!el.createKbPickerModal) return;
+  if (isOutlineFingerprintInputsLocked()) {
+    setStatus("大纲阶段未结束或任务进行中，暂不可修改参考知识库");
+    return;
+  }
   void loadKnowledgeBases();
   state.createKbPickerDraftIds = [...getSelectedKbIdsForCreate()];
   renderCreateKbPickerCards();
@@ -767,6 +771,23 @@ function hasOutlineCheckpointToResume() {
   return Boolean(String(cp.phase || "").trim());
 }
 
+/**
+ * 锁定会影响服务端 outline 输入指纹的表单项：
+ * - 本地正在生成大纲、或服务端任务心跳仍“新鲜”、或存在可恢复 checkpoint 时，禁止改概要/章数/知识库，避免误触整段重跑。
+ */
+function isOutlineFingerprintInputsLocked() {
+  if (state.isGeneratingOutline) return true;
+  if (isOutlineJobRunningFresh()) return true;
+  if (hasOutlineCheckpointToResume()) return true;
+  return false;
+}
+
+function isOutlinePipelineIncomplete(projectData) {
+  const cp = projectData && projectData.outline_checkpoint;
+  if (!cp || typeof cp !== "object") return false;
+  return Boolean(String(cp.phase || "").trim());
+}
+
 const el = {
   layout: document.querySelector(".layout"),
   status: document.getElementById("global-status"),
@@ -1072,11 +1093,13 @@ function deriveProjectProgress(projectData) {
   return "intent_only";
 }
 
-function shouldHideCreatePanelForProgress(progress) {
+function shouldHideCreatePanelForProgress(progress, projectData = null) {
+  if (isOutlinePipelineIncomplete(projectData)) return false;
   return progress === "outlined_or_writing";
 }
 
-function shouldShowPlotIdeasForProgress(progress, ideasCount) {
+function shouldShowPlotIdeasForProgress(progress, ideasCount, projectData = null) {
+  if (isOutlinePipelineIncomplete(projectData)) return Number(ideasCount) > 0;
   if (progress === "outlined_or_writing") return false;
   return Number(ideasCount) > 0;
 }
@@ -1097,7 +1120,7 @@ function projectHasOutlineForKbLock(projectData) {
 function updateCreatePanelVisibility(projectData) {
   if (!el.panelCreate) return;
   const progress = deriveProjectProgress(projectData);
-  const shouldHide = shouldHideCreatePanelForProgress(progress);
+  const shouldHide = shouldHideCreatePanelForProgress(progress, projectData);
   el.panelCreate.hidden = shouldHide;
   if (el.layout) {
     el.layout.classList.toggle("is-create-hidden", shouldHide);
@@ -1107,7 +1130,8 @@ function updateCreatePanelVisibility(projectData) {
 function updateDetailLayout(projectData) {
   if (!el.panelDetail) return;
   const progress = deriveProjectProgress(projectData);
-  el.panelDetail.classList.toggle("has-outline", progress === "outlined_or_writing");
+  const pipelineIncomplete = isOutlinePipelineIncomplete(projectData);
+  el.panelDetail.classList.toggle("has-outline", progress === "outlined_or_writing" && !pipelineIncomplete);
 }
 
 function setDetailPanelVisibility(visible) {
@@ -1305,9 +1329,22 @@ function syncSummarySourceState() {
   const hasOutlineSource = hasCustomSummary || hasSelectedIdea || hasSavedSummary;
   const canResume = hasOutlineCheckpointToResume();
   const runningFresh = isOutlineJobRunningFresh();
+  const fpLocked = isOutlineFingerprintInputsLocked();
   if (el.btnGenerateIdeas) {
     // 自定义概要与候选概要必须二选一；有自定义输入时禁用“生成概要”避免语义冲突。
-    el.btnGenerateIdeas.disabled = state.isGeneratingOutline || hasCustomSummary;
+    el.btnGenerateIdeas.disabled = fpLocked || hasCustomSummary;
+  }
+  if (el.btnOpenCreateKbPicker) {
+    el.btnOpenCreateKbPicker.disabled = fpLocked;
+  }
+  if (el.totalChapters) {
+    el.totalChapters.disabled = fpLocked;
+  }
+  if (el.customSummary) {
+    el.customSummary.disabled = fpLocked;
+  }
+  if (el.instruction) {
+    el.instruction.disabled = fpLocked;
   }
   if (el.btnGenerateOutline) {
     if (state.isGeneratingOutline) {
@@ -1326,6 +1363,9 @@ function syncSummarySourceState() {
     state.selectedIdea = state.plotIdeas[0];
   }
   renderPlotIdeas(state.plotIdeas);
+  if (el.plotIdeas) {
+    el.plotIdeas.classList.toggle("is-disabled", isOutlineFingerprintInputsLocked());
+  }
 }
 
 function setOutlineGeneratingUI(isGenerating) {
@@ -1335,13 +1375,11 @@ function setOutlineGeneratingUI(isGenerating) {
     el.customSummary,
     el.btnGenerateOutline,
     el.btnOpenCreateKbPicker,
+    el.totalChapters,
   ];
   lockTargets.forEach((node) => {
     if (node) node.disabled = state.isGeneratingOutline;
   });
-  if (el.plotIdeas) {
-    el.plotIdeas.classList.toggle("is-disabled", state.isGeneratingOutline);
-  }
   syncSummarySourceState();
 }
 
@@ -1512,7 +1550,8 @@ async function openProject(projectId) {
   try {
     const p = await api.get(`/projects/${projectId}`);
     state.currentProjectProgress = deriveProjectProgress(p);
-    const showDetail = state.currentProjectProgress === "outlined_or_writing";
+    const pipelineIncomplete = isOutlinePipelineIncomplete(p);
+    const showDetail = state.currentProjectProgress === "outlined_or_writing" && !pipelineIncomplete;
     const chapters = p.chapters || [];
     state.chapterMetas = chapters;
     const generatedCount = chapters.length;
@@ -1542,7 +1581,16 @@ async function openProject(projectId) {
     if (el.customSummary && selectedSummary && !state.selectedIdea) {
       el.customSummary.value = selectedSummary;
     }
+    state.outlineJob =
+      p && p.outline_job && typeof p.outline_job === "object"
+        ? { ...p.outline_job }
+        : { status: "idle", job_id: "", started_at: 0, last_heartbeat_at: 0 };
+    state.outlineCheckpoint =
+      p && p.outline_checkpoint && typeof p.outline_checkpoint === "object"
+        ? { ...p.outline_checkpoint }
+        : { phase: null, input_fingerprint: "", updated_at: 0 };
     renderPlotIdeas(ideas);
+    setPlotIdeasSectionVisibility(shouldShowPlotIdeasForProgress(state.currentProjectProgress, ideas.length, p));
     updateChapterActionButtons();
     if (el.totalChapters && Number.isFinite(p.total_chapters)) {
       el.totalChapters.value = String(p.total_chapters);
@@ -1566,14 +1614,6 @@ async function openProject(projectId) {
     state.totalChapters = Number.isFinite(Number(p.total_chapters))
       ? Number(p.total_chapters)
       : 0;
-    state.outlineJob =
-      p && p.outline_job && typeof p.outline_job === "object"
-        ? { ...p.outline_job }
-        : { status: "idle", job_id: "", started_at: 0, last_heartbeat_at: 0 };
-    state.outlineCheckpoint =
-      p && p.outline_checkpoint && typeof p.outline_checkpoint === "object"
-        ? { ...p.outline_checkpoint }
-        : { phase: null, input_fingerprint: "", updated_at: 0 };
     state.styleConstraint = String((p && p.style_constraint) || "").trim();
     updateOutlineWindowRangeHint();
     await loadKnowledgeBases();
@@ -1798,7 +1838,7 @@ function renderPlotIdeas(ideas) {
   (state.plotIdeas || []).forEach((idea, idx) => {
     const card = document.createElement("div");
     card.className = "card";
-    if (state.isGeneratingOutline) card.classList.add("is-disabled");
+    if (isOutlineFingerprintInputsLocked()) card.classList.add("is-disabled");
     if (state.selectedIdea === idea) card.classList.add("selected");
     if (state.expandedIdeaIndex === idx) card.classList.add("expanded");
     card.innerHTML = `
@@ -1809,7 +1849,7 @@ function renderPlotIdeas(ideas) {
       <div class="card-body">${escapeHtml(idea)}</div>
     `;
     card.onclick = () => {
-      if (state.isGeneratingOutline) return;
+      if (isOutlineFingerprintInputsLocked()) return;
       if (shouldIgnoreCardClickForTextSelection(card)) return;
       state.expandedIdeaIndex = state.expandedIdeaIndex === idx ? null : idx;
       state.selectedIdea = idea;
@@ -2115,6 +2155,10 @@ async function saveStyleConstraint() {
 async function generateIdeas() {
   if (!el.instruction) {
     setStatus("错误：页面元素未加载完成，请刷新后重试");
+    return;
+  }
+  if (isOutlineFingerprintInputsLocked()) {
+    setStatus("大纲阶段未结束或任务进行中，请先在「继续生成大纲」完成后再生成概要");
     return;
   }
   const instruction = el.instruction.value.trim();
