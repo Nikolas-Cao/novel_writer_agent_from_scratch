@@ -42,7 +42,7 @@ copy .env-sample .env
 - `DEFAULT_TOTAL_CHAPTERS`：默认目标章节数（默认 100）
 - `PLOT_IDEAS_COUNT`：生成剧情概要候选数量（默认 5）
 - `RAG_PREVIOUS_CHAPTERS`：写章时检索前文章节摘要数量（默认 5）
-- `WRITE_CHAPTER_PREV_TAIL_CHARS`：写第 n 章时注入第 n-1 章正文末尾字符数，便于承接悬置动作（默认 1200；设为 `0` 关闭）
+- `WRITE_CHAPTER_PREV_TAIL_CHARS`：写第 n 章时注入第 n-1 章正文末尾字符数（Unicode 长度，纯中文即约 N 字），便于承接悬置动作（默认 600；设为 `0` 关闭）
 - `CHARACTER_GRAPH_RECENT_CHAPTERS`：写章时人物关系摘要的章节滑窗宽度（默认 5）
 - `IMAGE_GEN_API_KEY` / `IMAGE_GEN_BASE_URL` / `IMAGE_GEN_MODEL` / `IMAGE_GEN_SIZE` / `IMAGE_GEN_TIMEOUT_S`：章节插图走 OpenAI Images（`IMAGE_GEN_API_KEY` 默认可回退 `OPENAI_API_KEY` / `PLANNER_API_KEY`）；生图失败则本张插图跳过
 - `PLAN_OUTLINE_SINGLE_CALL_MAX`：超过该章节数则长篇大纲改为「极简骨架 + 滚动扩窗」策略（默认 16）
@@ -100,6 +100,7 @@ python -m uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 - **项目硬删除**：`DELETE /projects/{project_id}` 会删除 `checkpoints/api_state/{project_id}.json`、`projects/{project_id}`（章节/图谱/插图）和 `vector_store/{project_id}`。
 - **项目事件日志**：关键写作流程会写入 `projects/{project_id}/event_logs.ndjson`（默认记录 `event_name` + 简短 `event_content`，并附带时间/状态/章节号）；可通过 `GET /projects/{project_id}/events` 查询。
 - **流式响应**：部分接口支持 `stream` 查询参数；NDJSON 进度通道在服务端使用**无界** `asyncio.Queue`，避免 token 高频进度与慢客户端之间的死锁。**反馈重写**在 `stream=1` 时仅对润色阶段推送正文 token 流（`refine_chapter_stream`），按反馈重写阶段不推送 token 流。
+- **最新章派生状态拆分持久化**：`post_chapter` 产出的“最新章摘要/本章二创覆盖增量”等不直接落主 state JSON，而写入 `projects/{project_id}/chapter_head_overlay.json`；读取项目详情时返回主 state 与 overlay 的合并视图。执行 `POST /projects/{project_id}/chapters/next` 时会先把 overlay 提交进主 state 再续写下一章；`rewrite/regenerate` 开始前会清空旧 overlay，避免上一轮同章分析污染重写。
 
 </details>
 

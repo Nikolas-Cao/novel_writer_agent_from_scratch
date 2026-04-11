@@ -60,7 +60,7 @@ from memory import LocalFileCheckpointer
 from rag import LocalRagIndexer, LocalRagRetriever
 from rag.global_kb_chroma import GlobalKbChroma
 from rag.global_kb_retriever import GlobalKbRetriever
-from storage import ChapterStore, CharacterGraphStore, EventLogStore
+from storage import ChapterHeadOverlayStore, ChapterStore, CharacterGraphStore, EventLogStore
 
 logger = logging.getLogger(__name__)
 
@@ -319,6 +319,7 @@ def create_app(
     writer_streaming = writer_llm or create_writer_llm(streaming=True)
 
     chapter_store = ChapterStore(root=projects_dir)
+    head_overlay_store = ChapterHeadOverlayStore(root=projects_dir)
     graph_store = CharacterGraphStore(root=projects_dir)
     event_store = EventLogStore(root=projects_dir)
     rag_indexer = LocalRagIndexer(root=vector_dir)
@@ -576,7 +577,99 @@ def create_app(
                 total += len(vol.get("chapters") or [])
         return total - 1
 
-    def load_state(project_id: str) -> Dict[str, Any]:
+    _HEAD_OVERLAY_PENDING_KEY = "_chapter_head_overlay_pending"
+
+    def _safe_int(value: Any, default: int = -1) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return int(default)
+
+    def _canon_override_key(item: Dict[str, Any]) -> str:
+        subj = str(item.get("subject") or "").strip()
+        eff = _safe_int(item.get("effective_from_chapter"), default=-1)
+        return f"{subj}::{eff}"
+
+    def _merge_canon_overrides(base: List[Dict[str, Any]], patch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        merged = [dict(x) for x in (base or []) if isinstance(x, dict)]
+        by_key = {_canon_override_key(x): i for i, x in enumerate(merged)}
+        for item in patch or []:
+            if not isinstance(item, dict):
+                continue
+            key = _canon_override_key(item)
+            if key in by_key:
+                merged[by_key[key]] = {**merged[by_key[key]], **dict(item)}
+            else:
+                by_key[key] = len(merged)
+                merged.append(dict(item))
+        return merged
+
+    def _apply_head_overlay_view(state: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
+        # 思路：
+        # 1) 主 state 只保留“已提交”事实，overlay 只描述最新章可被重写推翻的派生分析；
+        # 2) 对外读取（GET）时合并视图，保证前端可见最新章摘要与覆盖，而不污染主持久化。
+        # 边界：overlay 章号与当前最新章不一致时视为过期，不做合并。
+        if not isinstance(overlay, dict):
+            return state
+        out = dict(state)
+        overlay_idx = _safe_int(overlay.get("chapter_index"), default=-1)
+        latest_idx = latest_chapter_index(out)
+        if latest_idx is None or overlay_idx != latest_idx:
+            return out
+        overlay_summary = str(overlay.get("last_chapter_summary") or "").strip()
+        if overlay_summary:
+            chapters = [dict(x) for x in (out.get("chapters") or [])]
+            for item in chapters:
+                if _safe_int(item.get("index"), default=-1) == overlay_idx:
+                    item["summary"] = overlay_summary
+                    break
+            out["chapters"] = chapters
+            out["last_chapter_summary"] = overlay_summary
+        delta = [dict(x) for x in (overlay.get("canon_overrides_delta") or []) if isinstance(x, dict)]
+        if delta:
+            out["canon_overrides"] = _merge_canon_overrides(
+                list(out.get("canon_overrides") or []),
+                delta,
+            )
+        if isinstance(overlay.get("character_graph"), dict):
+            out["character_graph"] = dict(overlay.get("character_graph") or {})
+        return out
+
+    def _commit_head_overlay_into_state(project_id: str, state: Dict[str, Any]) -> None:
+        overlay = head_overlay_store.load(project_id)
+        if not overlay:
+            return
+        merged = _apply_head_overlay_view(state, overlay)
+        state.update(merged)
+        head_overlay_store.clear(project_id)
+
+    def _clear_head_overlay(project_id: str) -> None:
+        head_overlay_store.clear(project_id)
+
+    def _stage_head_overlay_from_post_result(state: Dict[str, Any], post_out: Dict[str, Any]) -> None:
+        current_idx = _safe_int(state.get("current_chapter_index"), default=0)
+        all_canon = list(post_out.get("canon_overrides") or [])
+        delta = [
+            dict(item)
+            for item in all_canon
+            if isinstance(item, dict)
+            and _safe_int(item.get("effective_from_chapter"), default=-1) == current_idx
+        ]
+        payload = {
+            "chapter_index": current_idx,
+            "last_chapter_summary": str(post_out.get("last_chapter_summary") or "").strip(),
+            "canon_overrides_delta": delta,
+            "character_graph": dict(post_out.get("character_graph") or {}),
+        }
+        chapters = [dict(x) for x in (state.get("chapters") or [])]
+        for item in chapters:
+            if _safe_int(item.get("index"), default=-1) == current_idx:
+                item["summary"] = ""
+                break
+        state["chapters"] = chapters
+        state[_HEAD_OVERLAY_PENDING_KEY] = payload
+
+    def load_state(project_id: str, *, include_head_overlay: bool = False) -> Dict[str, Any]:
         data = checkpointer.load_state(project_id) or _default_state(project_id)
         has_generated_until = "outline_generated_until" in data
         if "project_id" not in data:
@@ -604,10 +697,17 @@ def create_app(
         job.setdefault("last_heartbeat_at", 0)
         if not has_generated_until:
             data["outline_generated_until"] = _outline_last_index(data.get("outline_structure") or {"volumes": []})
+        if include_head_overlay:
+            overlay = head_overlay_store.load(project_id)
+            if overlay:
+                data = _apply_head_overlay_view(data, overlay)
         return data
 
     def save_state(project_id: str, state: Dict[str, Any]) -> None:
+        overlay_payload = state.pop(_HEAD_OVERLAY_PENDING_KEY, None)
         checkpointer.save_state(project_id, state)
+        if isinstance(overlay_payload, dict):
+            head_overlay_store.save(project_id, overlay_payload)
 
     def _outline_lock(project_id: str) -> asyncio.Lock:
         lock = _outline_project_locks.get(project_id)
@@ -1008,7 +1108,7 @@ def create_app(
                 rag_indexer=rag_indexer,
                 graph_store=graph_store,
             )
-            state.update(out)
+            _stage_head_overlay_from_post_result(state, out)
             logger.info("[%s] pipeline_done project=%s chapter_index=%s", scene, pid, ch_idx)
         except Exception as exc:
             raise_llm_http_error(exc, scene=scene)
@@ -1044,7 +1144,7 @@ def create_app(
     async def get_project(project_id: str):
         if not project_exists(project_id):
             raise HTTPException(status_code=404, detail="project not found")
-        state = load_state(project_id)
+        state = load_state(project_id, include_head_overlay=True)
         return {
             "project_id": project_id,
             "nickname": state.get("nickname"),
@@ -1457,14 +1557,14 @@ def create_app(
     async def list_chapters(project_id: str):
         if not project_exists(project_id):
             raise HTTPException(status_code=404, detail="project not found")
-        state = load_state(project_id)
+        state = load_state(project_id, include_head_overlay=True)
         return {"chapters": state.get("chapters", [])}
 
     @app.get("/projects/{project_id}/chapters/{index}")
     async def get_chapter(project_id: str, index: int):
         if not project_exists(project_id):
             raise HTTPException(status_code=404, detail="project not found")
-        state = load_state(project_id)
+        state = load_state(project_id, include_head_overlay=True)
         meta = chapter_meta_of(state, index)
         try:
             if meta and meta.get("path_or_content_ref"):
@@ -1497,6 +1597,7 @@ def create_app(
 
         async def _run_next(emit: ProgressFn) -> Dict[str, Any]:
             state = load_state(project_id)
+            _commit_head_overlay_into_state(project_id, state)
             outline = state.get("outline_structure", {"volumes": []})
             if not outline.get("volumes"):
                 raise HTTPException(status_code=400, detail="outline not generated")
@@ -1580,6 +1681,7 @@ def create_app(
 
         async def _run_regen(emit: ProgressFn) -> Dict[str, Any]:
             state = load_state(project_id)
+            _clear_head_overlay(project_id)
             outline = state.get("outline_structure", {"volumes": []})
             if not outline.get("volumes"):
                 raise HTTPException(status_code=400, detail="outline not generated")
@@ -1677,6 +1779,7 @@ def create_app(
         rag_indexer.delete_chapter_summaries_from(project_id, keep_to + 1)
         graph_store.delete_snapshots_from(project_id, keep_to + 1)
         graph_store.refresh_legacy_latest(project_id)
+        _clear_head_overlay(project_id)
         state["character_graph"] = graph_store.load_for_chapter(project_id, keep_to)
         save_state(project_id, state)
         return {
@@ -1693,6 +1796,7 @@ def create_app(
 
         async def _run_rewrite(emit: ProgressFn) -> Dict[str, Any]:
             state = load_state(project_id)
+            _clear_head_overlay(project_id)
             ensure_latest_chapter_only(state, index)
             try:
                 chapter_text = chapter_store.load(project_id, index)
@@ -1773,7 +1877,7 @@ def create_app(
                     rag_indexer=rag_indexer,
                     graph_store=graph_store,
                 )
-                state.update(out)
+                _stage_head_overlay_from_post_result(state, out)
             except Exception as exc:
                 emit_project_event(
                     project_id,

@@ -385,11 +385,103 @@ def test_style_constraint_persist_and_apply_in_api():
     shutil.rmtree(root, ignore_errors=True)
 
 
+def test_head_overlay_isolation_and_commit():
+    from server import create_app
+
+    class CaptureWriter(ApiWriterLLM):
+        def __init__(self) -> None:
+            self.prompts = []
+
+        async def ainvoke(self, prompt: str):
+            self.prompts.append(prompt)
+            return await super().ainvoke(prompt)
+
+    root = _tmp_root()
+    writer = CaptureWriter()
+    app = create_app(
+        planner_llm=ApiPlannerLLM(),
+        writer_llm=writer,
+        projects_root=root / "projects",
+        vector_root=root / "vector",
+        checkpoint_root=root / "states",
+    )
+    client = TestClient(app)
+
+    r = client.post("/projects", json={"instruction": "都市悬疑", "total_chapters": 3})
+    assert r.status_code == 200
+    project_id = r.json()["project_id"]
+
+    r = client.post(f"/projects/{project_id}/plot-ideas", json={"instruction": "都市悬疑"})
+    ideas = r.json()["plot_ideas"]
+    r = client.post(
+        f"/projects/{project_id}/outline",
+        json={"selected_plot_summary": ideas[0], "total_chapters": 3},
+    )
+    assert r.status_code == 200
+
+    r = client.post(f"/projects/{project_id}/chapters/next", json={})
+    assert r.status_code == 200
+    assert r.json()["chapter_index"] == 0
+
+    state_path = root / "states" / f"{project_id}.json"
+    overlay_path = root / "projects" / project_id / "chapter_head_overlay.json"
+    assert overlay_path.exists()
+
+    saved_state = json.loads(state_path.read_text(encoding="utf-8"))
+    ch0 = next((c for c in saved_state.get("chapters", []) if int(c.get("index", -1)) == 0), None)
+    assert ch0 is not None
+    assert not str(ch0.get("summary") or "").strip()
+
+    r = client.get(f"/projects/{project_id}")
+    assert r.status_code == 200
+    ch0_view = next((c for c in r.json().get("chapters", []) if int(c.get("index", -1)) == 0), None)
+    assert ch0_view is not None
+    assert "本章摘要" in str(ch0_view.get("summary") or "")
+
+    polluted_overlay = {
+        "chapter_index": 0,
+        "last_chapter_summary": "污染摘要",
+        "canon_overrides_delta": [
+            {
+                "subject": "污染设定XYZ",
+                "original_fact": "A",
+                "fanfic_fact": "B",
+                "effective_from_chapter": 0,
+            }
+        ],
+        "character_graph": {"nodes": [], "edges": []},
+    }
+    overlay_path.write_text(json.dumps(polluted_overlay, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    r = client.post(
+        f"/projects/{project_id}/chapters/0/rewrite",
+        json={"user_feedback": "把结尾改得更悬疑", "update_outline": False},
+    )
+    assert r.status_code == 200
+    assert all("污染设定XYZ" not in p for p in writer.prompts)
+    refreshed_overlay = json.loads(overlay_path.read_text(encoding="utf-8"))
+    assert "污染设定XYZ" not in json.dumps(refreshed_overlay, ensure_ascii=False)
+
+    r = client.post(f"/projects/{project_id}/chapters/next", json={})
+    assert r.status_code == 200
+    assert r.json()["chapter_index"] == 1
+
+    saved_state = json.loads(state_path.read_text(encoding="utf-8"))
+    ch0 = next((c for c in saved_state.get("chapters", []) if int(c.get("index", -1)) == 0), None)
+    assert ch0 is not None
+    assert "本章摘要" in str(ch0.get("summary") or "")
+    overlay_after_next = json.loads(overlay_path.read_text(encoding="utf-8"))
+    assert int(overlay_after_next.get("chapter_index", -1)) == 1
+
+    shutil.rmtree(root, ignore_errors=True)
+
+
 def run_all():
     test_phase5_api_flow()
     test_phase5_outline_multi_phase_api()
     test_phase5_extend_failure_not_persisted()
     test_style_constraint_persist_and_apply_in_api()
+    test_head_overlay_isolation_and_commit()
     print("Phase 5 acceptance: all passed.")
 
 
