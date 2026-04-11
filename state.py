@@ -90,6 +90,21 @@ class CharacterGraph(TypedDict):
     edges: List[CharacterEdge]
 
 
+class OutlineCheckpoint(TypedDict, total=False):
+    """大纲生成检查点（阶段级恢复）。"""
+    phase: Optional[str]  # skeleton_done | initial_extend_done | None
+    input_fingerprint: str
+    updated_at: int
+
+
+class OutlineJob(TypedDict, total=False):
+    """大纲生成任务状态（互斥 + 心跳）。"""
+    status: str  # idle | running | failed
+    job_id: str
+    started_at: int
+    last_heartbeat_at: int
+
+
 # ----- LangGraph 状态 -----
 
 class NovelProjectState(TypedDict, total=False):
@@ -140,3 +155,5 @@ class NovelProjectState(TypedDict, total=False):
     kb_assets_text: str
     kb_evidence_text: str
     kb_confidence: Optional[float]
+    outline_checkpoint: OutlineCheckpoint
+    outline_job: OutlineJob

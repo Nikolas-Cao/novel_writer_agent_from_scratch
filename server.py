@@ -4,6 +4,7 @@
 """
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -22,7 +23,15 @@ from openai import APIConnectionError as OpenAIAPIConnectionError
 from openai import APITimeoutError as OpenAIAPITimeoutError
 from pydantic import BaseModel, Field
 
-from config import CHAPTER_WORD_TARGET, CHECKPOINT_DIR, DEFAULT_TOTAL_CHAPTERS, PROJECTS_ROOT, VECTOR_STORE_DIR
+from config import (
+    CHAPTER_WORD_TARGET,
+    CHECKPOINT_DIR,
+    DEFAULT_TOTAL_CHAPTERS,
+    OUTLINE_HEARTBEAT_INTERVAL_S,
+    OUTLINE_JOB_STALE_AFTER_S,
+    PROJECTS_ROOT,
+    VECTOR_STORE_DIR,
+)
 from logging_setup import configure_app_logging
 
 configure_app_logging()
@@ -34,7 +43,9 @@ from graph.nodes.identify_illustration_points import identify_illustration_point
 from graph.nodes.insert_illustrations_into_chapter import insert_illustrations_into_chapter_node
 from graph.nodes.outline_extend_window import outline_extend_window_node
 from graph.nodes.outline_finalize import outline_finalize_node
-from graph.nodes.plan_outline import plan_outline_extend_node, plan_outline_node
+from graph.nodes.outline_short import outline_short_node
+from graph.nodes.outline_skeleton_lite import outline_skeleton_lite_node
+from graph.nodes.plan_outline import PLAN_OUTLINE_SINGLE_CALL_MAX, plan_outline_extend_node
 from graph.nodes.post_chapter import post_chapter_node
 from graph.nodes.refine_chapter import refine_chapter_node
 from graph.nodes.rewrite_feedback import rewrite_with_feedback_node
@@ -71,12 +82,21 @@ async def ndjson_with_progress(run: Callable[[ProgressFn], Awaitable[Any]]) -> A
     进度队列必须无界：润色/重写等场景会按 token 高频 emit；若使用有界 Queue，
     而下游因 TCP 反压在 yield 上阻塞，worker 会在 put 上永久等待，形成死锁，
     前端表现为连接挂起、既收不到 result 也收不到 error。
+
+    思路：
+    1) emit 仅入队，不触网；真正发往浏览器的是本生成器里的 yield。
+    2) 客户端断开时异常通常出在 yield，而不是 run(emit) 内部；故不因进度行写出失败而中断 worker。
+    3) finally 里用 asyncio.shield 等待 worker，降低断连取消当前 Task 时未等完业务协程的概率。
     """
 
     q: asyncio.Queue = asyncio.Queue()
 
     async def emit(stage: str, message: str = "") -> None:
-        await q.put(("p", {"type": "progress", "stage": stage, "message": message}))
+        # put 在无界队列上几乎不会失败；若未来改队列实现，避免异常冒泡打断 run(emit)。
+        try:
+            await q.put(("p", {"type": "progress", "stage": stage, "message": message}))
+        except Exception as exc:
+            logger.warning("ndjson emit queue put failed: %s", exc)
 
     async def worker() -> None:
         try:
@@ -90,25 +110,50 @@ async def ndjson_with_progress(run: Callable[[ProgressFn], Awaitable[Any]]) -> A
             await q.put(("err", str(exc)))
 
     task = asyncio.create_task(worker())
+    progress_yield_fail_logged = False
     try:
         while True:
             kind, payload = await q.get()
             if kind == "p":
-                yield (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+                chunk = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+                try:
+                    yield chunk
+                except Exception as exc:
+                    # 常见：对端关闭连接后 ASGI send 失败；业务 worker 应继续跑完并落盘。
+                    if not progress_yield_fail_logged:
+                        logger.debug("ndjson progress yield skipped (client likely gone): %s", exc)
+                        progress_yield_fail_logged = True
+                    continue
             elif kind == "ok":
-                yield (json.dumps({"type": "result", "body": payload}, ensure_ascii=False) + "\n").encode("utf-8")
+                chunk = (json.dumps({"type": "result", "body": payload}, ensure_ascii=False) + "\n").encode(
+                    "utf-8"
+                )
+                try:
+                    yield chunk
+                except Exception as exc:
+                    logger.debug("ndjson result yield skipped (client likely gone): %s", exc)
                 break
             elif kind == "http_err":
                 status_code, msg = payload
-                yield (
+                chunk = (
                     json.dumps({"type": "error", "detail": msg, "status": status_code}, ensure_ascii=False) + "\n"
                 ).encode("utf-8")
+                try:
+                    yield chunk
+                except Exception as exc:
+                    logger.debug("ndjson error-line yield skipped (client likely gone): %s", exc)
                 break
             elif kind == "err":
-                yield (json.dumps({"type": "error", "detail": payload}, ensure_ascii=False) + "\n").encode("utf-8")
+                chunk = (json.dumps({"type": "error", "detail": payload}, ensure_ascii=False) + "\n").encode(
+                    "utf-8"
+                )
+                try:
+                    yield chunk
+                except Exception as exc:
+                    logger.debug("ndjson error-line yield skipped (client likely gone): %s", exc)
                 break
     finally:
-        await task
+        await asyncio.shield(task)
 
 
 class CreateProjectRequest(BaseModel):
@@ -145,6 +190,7 @@ class PlotIdeasRequest(BaseModel):
 class OutlineRequest(BaseModel):
     selected_plot_summary: str = Field(..., min_length=1)
     total_chapters: Optional[int] = None
+    force_restart: bool = False
 
 
 class OutlineWindowRequest(BaseModel):
@@ -208,6 +254,17 @@ def _default_state(project_id: str) -> Dict[str, Any]:
         "kb_assets_text": "",
         "kb_evidence_text": "",
         "kb_confidence": None,
+        "outline_checkpoint": {
+            "phase": None,
+            "input_fingerprint": "",
+            "updated_at": 0,
+        },
+        "outline_job": {
+            "status": "idle",
+            "job_id": "",
+            "started_at": 0,
+            "last_heartbeat_at": 0,
+        },
     }
 
 
@@ -273,6 +330,7 @@ def create_app(
     kb_chroma = GlobalKbChroma(vector_dir)
     _kb_cancel_events: Dict[str, asyncio.Event] = {}
     _kb_background_tasks: Dict[str, asyncio.Task] = {}
+    _outline_project_locks: Dict[str, asyncio.Lock] = {}
 
     def _kb_cancel_key(kb_id: str, job_id: str) -> str:
         return f"{kb_id}:{job_id}"
@@ -529,12 +587,99 @@ def create_app(
         for k, v in defaults.items():
             if k not in data:
                 data[k] = v
+        checkpoint = data.get("outline_checkpoint")
+        if not isinstance(checkpoint, dict):
+            checkpoint = {}
+            data["outline_checkpoint"] = checkpoint
+        checkpoint.setdefault("phase", None)
+        checkpoint.setdefault("input_fingerprint", "")
+        checkpoint.setdefault("updated_at", 0)
+        job = data.get("outline_job")
+        if not isinstance(job, dict):
+            job = {}
+            data["outline_job"] = job
+        job.setdefault("status", "idle")
+        job.setdefault("job_id", "")
+        job.setdefault("started_at", 0)
+        job.setdefault("last_heartbeat_at", 0)
         if not has_generated_until:
             data["outline_generated_until"] = _outline_last_index(data.get("outline_structure") or {"volumes": []})
         return data
 
     def save_state(project_id: str, state: Dict[str, Any]) -> None:
         checkpointer.save_state(project_id, state)
+
+    def _outline_lock(project_id: str) -> asyncio.Lock:
+        lock = _outline_project_locks.get(project_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _outline_project_locks[project_id] = lock
+        return lock
+
+    def _outline_checkpoint(state: Dict[str, Any]) -> Dict[str, Any]:
+        cp = state.get("outline_checkpoint")
+        if not isinstance(cp, dict):
+            cp = {"phase": None, "input_fingerprint": "", "updated_at": 0}
+            state["outline_checkpoint"] = cp
+        return cp
+
+    def _outline_job(state: Dict[str, Any]) -> Dict[str, Any]:
+        job = state.get("outline_job")
+        if not isinstance(job, dict):
+            job = {"status": "idle", "job_id": "", "started_at": 0, "last_heartbeat_at": 0}
+            state["outline_job"] = job
+        return job
+
+    def _set_outline_checkpoint(state: Dict[str, Any], *, phase: Optional[str], fingerprint: str) -> None:
+        cp = _outline_checkpoint(state)
+        cp["phase"] = phase
+        cp["input_fingerprint"] = fingerprint
+        cp["updated_at"] = int(time.time())
+
+    def _set_outline_job(
+        state: Dict[str, Any],
+        *,
+        status: str,
+        job_id: Optional[str] = None,
+        started_at: Optional[int] = None,
+        heartbeat_at: Optional[int] = None,
+    ) -> None:
+        job = _outline_job(state)
+        job["status"] = status
+        if job_id is not None:
+            job["job_id"] = job_id
+        if started_at is not None:
+            job["started_at"] = int(started_at)
+        if heartbeat_at is not None:
+            job["last_heartbeat_at"] = int(heartbeat_at)
+
+    def _outline_fingerprint(
+        *,
+        selected_plot_summary: str,
+        total_chapters: int,
+        kb_enabled: bool,
+        selected_kb_ids: List[str],
+    ) -> str:
+        payload = {
+            "selected_plot_summary": str(selected_plot_summary or "").strip(),
+            "total_chapters": int(total_chapters),
+            "kb_enabled": bool(kb_enabled),
+            "selected_kb_ids": sorted(str(x) for x in (selected_kb_ids or [])),
+        }
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+    def _is_outline_job_stale(state: Dict[str, Any], now_ts: int) -> bool:
+        job = _outline_job(state)
+        if str(job.get("status") or "") != "running":
+            return False
+        try:
+            last_hb = int(job.get("last_heartbeat_at") or 0)
+        except (TypeError, ValueError):
+            last_hb = 0
+        if last_hb <= 0:
+            return True
+        return (int(now_ts) - int(last_hb)) >= int(OUTLINE_JOB_STALE_AFTER_S)
 
     def list_project_ids() -> List[str]:
         ids = {p.name for p in projects_dir.iterdir() if p.is_dir()}
@@ -921,6 +1066,13 @@ def create_app(
             "selected_kb_ids": state.get("selected_kb_ids") or [],
             "kb_enabled": bool(state.get("kb_enabled")),
             "canon_overrides": state.get("canon_overrides") or [],
+            "outline_checkpoint": state.get("outline_checkpoint") or {"phase": None, "input_fingerprint": "", "updated_at": 0},
+            "outline_job": state.get("outline_job") or {
+                "status": "idle",
+                "job_id": "",
+                "started_at": 0,
+                "last_heartbeat_at": 0,
+            },
         }
 
     @app.get("/projects/{project_id}/events")
@@ -1019,13 +1171,57 @@ def create_app(
         if not project_exists(project_id):
             raise HTTPException(status_code=404, detail="project not found")
 
+        lock = _outline_lock(project_id)
+
+        async def _save_state_with_lock(state: Dict[str, Any]) -> None:
+            async with lock:
+                save_state(project_id, state)
+
+        async def _prepare_outline_run() -> Dict[str, Any]:
+            async with lock:
+                state = load_state(project_id)
+                state["selected_plot_summary"] = req.selected_plot_summary
+                if req.total_chapters is not None:
+                    state["total_chapters"] = int(req.total_chapters)
+                if "outline_initial_chapters" not in state:
+                    state["outline_initial_chapters"] = OUTLINE_INITIAL_CHAPTERS
+                if "outline_window_size" not in state:
+                    state["outline_window_size"] = OUTLINE_WINDOW_SIZE
+                total = int(state.get("total_chapters") or DEFAULT_TOTAL_CHAPTERS)
+                fp = _outline_fingerprint(
+                    selected_plot_summary=req.selected_plot_summary,
+                    total_chapters=total,
+                    kb_enabled=bool(state.get("kb_enabled")),
+                    selected_kb_ids=list(state.get("selected_kb_ids") or []),
+                )
+                cp = _outline_checkpoint(state)
+                prev_fp = str(cp.get("input_fingerprint") or "")
+                if req.force_restart:
+                    _set_outline_checkpoint(state, phase=None, fingerprint=fp)
+                elif prev_fp and prev_fp != fp:
+                    _set_outline_checkpoint(state, phase=None, fingerprint=fp)
+                elif not prev_fp:
+                    _set_outline_checkpoint(state, phase=cp.get("phase"), fingerprint=fp)
+
+                now_ts = int(time.time())
+                job = _outline_job(state)
+                if str(job.get("status") or "") == "running":
+                    if not _is_outline_job_stale(state, now_ts):
+                        raise HTTPException(status_code=409, detail="大纲生成进行中，请稍后再试")
+                    _set_outline_job(state, status="idle", heartbeat_at=now_ts)
+                new_job_id = f"oj-{uuid.uuid4().hex[:16]}"
+                _set_outline_job(
+                    state,
+                    status="running",
+                    job_id=new_job_id,
+                    started_at=now_ts,
+                    heartbeat_at=now_ts,
+                )
+                save_state(project_id, state)
+                return state
+
         async def _run_outline(emit: ProgressFn) -> Dict[str, Any]:
-            state = load_state(project_id)
-            state["selected_plot_summary"] = req.selected_plot_summary
-            if "outline_initial_chapters" not in state:
-                state["outline_initial_chapters"] = OUTLINE_INITIAL_CHAPTERS
-            if "outline_window_size" not in state:
-                state["outline_window_size"] = OUTLINE_WINDOW_SIZE
+            state = await _prepare_outline_run()
             summary_brief = _truncate_event_text(req.selected_plot_summary)
             emit_project_event(
                 project_id,
@@ -1033,31 +1229,96 @@ def create_app(
                 event_content=f"根据{summary_brief}生成大纲",
                 status="start",
             )
-            if req.total_chapters is not None:
-                state["total_chapters"] = int(req.total_chapters)
-            tp, tw = _tracked(state)
+            tp, _tw = _tracked(state)
             logger.info("[生成大纲] start project=%s total_chapters=%s", project_id, state.get("total_chapters"))
             total = int(state.get("total_chapters") or DEFAULT_TOTAL_CHAPTERS)
-            # 先生成“全书骨架”（标题+简述），随后再按窗口扩写细节要点。
-            # 这样可以保证用户在一开始就看到完整章节框架，同时保留扩窗的成本优势。
-            initial_cnt = total
-            await emit("plan_outline", f"正在生成全书大纲骨架（共 {initial_cnt} 章）…")
-            kb_context = ""
-            if state.get("kb_enabled") and state.get("selected_kb_ids"):
-                kb_context = await build_kb_context_for_outline(
-                    kb_ids=list(state.get("selected_kb_ids") or []),
-                    plot_summary=req.selected_plot_summary,
-                    retriever=global_kb_retriever,
-                )
+            cp = _outline_checkpoint(state)
+            input_fp = str(cp.get("input_fingerprint") or "")
+            phase = str(cp.get("phase") or "")
+
+            hb_stop = asyncio.Event()
+
+            async def _heartbeat_loop() -> None:
+                while not hb_stop.is_set():
+                    try:
+                        await asyncio.wait_for(hb_stop.wait(), timeout=float(OUTLINE_HEARTBEAT_INTERVAL_S))
+                        break
+                    except asyncio.TimeoutError:
+                        pass
+                    _set_outline_job(state, status="running", heartbeat_at=int(time.time()))
+                    try:
+                        await _save_state_with_lock(state)
+                    except Exception as exc:
+                        logger.warning("[生成大纲] heartbeat save failed project=%s err=%s", project_id, exc)
+
+            hb_task = asyncio.create_task(_heartbeat_loop())
             try:
-                out = await plan_outline_node(
+                kb_context = ""
+                if state.get("kb_enabled") and state.get("selected_kb_ids"):
+                    kb_context = await build_kb_context_for_outline(
+                        kb_ids=list(state.get("selected_kb_ids") or []),
+                        plot_summary=req.selected_plot_summary,
+                        retriever=global_kb_retriever,
+                    )
+
+                if total <= PLAN_OUTLINE_SINGLE_CALL_MAX:
+                    if phase != "skeleton_done":
+                        await emit("plan_outline_short", f"正在生成全书结构化大纲（共 {total} 章）…")
+                        short_out = await outline_short_node(
+                            state,
+                            llm=tp,
+                            kb_context=kb_context or None,
+                            target_chapters=total,
+                        )
+                        state.update(short_out)
+                        _set_outline_checkpoint(state, phase="skeleton_done", fingerprint=input_fp)
+                        await emit("persist_checkpoint", "正在保存阶段进度（outline_short）…")
+                        await _save_state_with_lock(state)
+                        phase = "skeleton_done"
+                else:
+                    if phase not in {"skeleton_done", "initial_extend_done"}:
+                        await emit("plan_outline_skeleton", f"正在生成全书大纲骨架（共 {total} 章）…")
+                        sk_out = await outline_skeleton_lite_node(
+                            state,
+                            llm=tp,
+                            kb_context=kb_context or None,
+                        )
+                        state.update(sk_out)
+                        _set_outline_checkpoint(state, phase="skeleton_done", fingerprint=input_fp)
+                        await emit("persist_checkpoint", "正在保存阶段进度（outline_skeleton）…")
+                        await _save_state_with_lock(state)
+                        phase = "skeleton_done"
+
+                    if phase != "initial_extend_done":
+                        extend_count = int(state.get("outline_window_size") or OUTLINE_WINDOW_SIZE)
+                        await emit("plan_outline_extend", f"正在扩写首个窗口（前 {extend_count} 章）…")
+                        ext_out = await outline_extend_window_node(
+                            state,
+                            llm=tp,
+                            on_progress=emit,
+                            kb_context=kb_context or None,
+                            start_chapter=0,
+                            extend_count=extend_count,
+                        )
+                        state.update(ext_out)
+                        _set_outline_checkpoint(state, phase="initial_extend_done", fingerprint=input_fp)
+                        await emit("persist_checkpoint", "正在保存阶段进度（outline_extend）…")
+                        await _save_state_with_lock(state)
+
+                await emit("outline_finalize", "正在收敛最终大纲并写入索引…")
+                fin_out = await outline_finalize_node(
                     state,
                     llm=tp,
                     rag_indexer=rag_indexer,
-                    on_progress=emit,
                     kb_context=kb_context or None,
-                    target_chapters=initial_cnt,
                 )
+                state.update(fin_out)
+                if "outline_generated_until" not in fin_out:
+                    state["outline_generated_until"] = outline_generated_until(state)
+                _set_outline_checkpoint(state, phase=None, fingerprint=input_fp)
+                _set_outline_job(state, status="idle", heartbeat_at=int(time.time()))
+                await emit("persist", "正在保存大纲并写入 RAG 索引…")
+                await _save_state_with_lock(state)
             except Exception as exc:
                 emit_project_event(
                     project_id,
@@ -1065,13 +1326,17 @@ def create_app(
                     event_content=f"根据{summary_brief}生成大纲失败：{_truncate_event_text(str(exc))}",
                     status="error",
                 )
+                _set_outline_job(state, status="idle", heartbeat_at=int(time.time()))
+                try:
+                    await _save_state_with_lock(state)
+                except Exception:
+                    pass
                 raise_llm_http_error(exc, scene="生成大纲")
                 raise
-            state.update(out)
-            if "outline_generated_until" not in out:
-                state["outline_generated_until"] = outline_generated_until(state)
-            await emit("persist", "正在保存大纲并写入 RAG 索引…")
-            save_state(project_id, state)
+            finally:
+                hb_stop.set()
+                await hb_task
+
             emit_project_event(
                 project_id,
                 event_name="generate_outline",

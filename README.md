@@ -52,6 +52,7 @@ copy .env-sample .env
 - `OUTLINE_INITIAL_CHAPTERS`：历史兼容参数；当前 `/outline` 默认会先生成“全书骨架”（不再按该值截断章节数）
 - `OUTLINE_WINDOW_SIZE`：续写过程中每次自动补齐的大纲窗口大小（默认 10）
 - `OUTLINE_TRIGGER_MARGIN`：距离已生成大纲边界多少章时触发自动补窗（默认 0）
+- `OUTLINE_HEARTBEAT_INTERVAL_S` / `OUTLINE_JOB_STALE_AFTER_S`：大纲任务心跳间隔与 running 判死阈值（默认 180s / 600s）；用于“继续未完成任务”与同项目并发互斥
 - `PROJECTS_ROOT` / `CHECKPOINT_DIR` / `VECTOR_STORE_DIR`：本地落盘根路径（默认分别为仓库下 `projects/`、`checkpoints/`、`vector_store/`）。**章节与人物图谱等在 `projects/{project_id}/`，Chroma 向量库在 `vector_store/{project_id}/`，API 状态 JSON 在 `checkpoints/api_state/{project_id}.json`**，与 `docs/项目实现学习指南.md` 一致。
 - `DEBUG`：设为 `true/1/yes/on` 时，记录每次文本 LLM 调用到 `projects/{project_id}/llm_invoke_results/`。文件名为 `{utc_timestamp}_{status}_{purpose}_{short_id}.json`（`status=success/error`，`purpose` 为细粒度业务目的）。流式调用会在结束后聚合完整输出再写入单个 JSON。
 - **应用日志（Python logging）**：`APP_LOG_DIR`（默认仓库下 `logs/`）、`LOG_FILE_ENABLED`、`LOG_BACKUP_DAYS`（轮转文件保留天数）、`LOG_LEVEL`（如 `INFO`/`DEBUG`）、`LOG_TO_CONSOLE`（默认仅 `DEBUG=true` 时输出到 stderr；与业务事件 `event_logs.ndjson` 不同，见 `logging_setup.py`）。
@@ -85,7 +86,7 @@ python -m uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 - **（可选）同人知识库**：左侧「同人知识库」创建知识集、上传 `.txt`/`.md`；在**尚未生成大纲**的项目上勾选「绑定当前项目」（或在点击「生成概要」创建新项目前勾好，会随 `POST /projects` 一并提交）；生成大纲后绑定不可改
 - 新建项目：输入创作意图 → 点击 `生成概要`
 - 项目管理：在「项目列表」中对任一项目右键，可执行 `重命名`（设置项目昵称，列表优先显示昵称）和 `删除项目`（硬删除项目全部私有资源）
-- 选概要并生成大纲：选择候选/填写自定义 → 点击 `生成大纲`（默认先按 5 批循环生成全书骨架：每章 `title + description`，并做索引覆盖校验与失败批占位兜底；随后先扩写首个 `OUTLINE_WINDOW_SIZE` 窗口；长耗时接口可带查询参数 **`stream=1` 或 `stream=true`**，返回 NDJSON 进度流）
+- 选概要并生成大纲：选择候选/填写自定义 → 点击 `生成大纲`（默认先按 5 批循环生成全书骨架：每章 `title + description`，并做索引覆盖校验与失败批占位兜底；随后先扩写首个 `OUTLINE_WINDOW_SIZE` 窗口；阶段完成后会写入 checkpoint，失败可继续未完成任务；长耗时接口可带查询参数 **`stream=1` 或 `stream=true`**，返回 NDJSON 进度流）
 - 逐章创作：点击 `续写下一章`（可选勾选 **「开启图片生成」**；当写到大纲边界会自动补齐后续 `OUTLINE_WINDOW_SIZE` 章，并用最近摘要/大纲要点/人物关系保证连贯）
 - 事件日志：在项目详情点击 `查看事件日志`，弹窗查看该项目的重要事件（如生成概要/大纲、续写、反馈重写）
 
@@ -122,7 +123,7 @@ npm run test:ui
 1. 提升本地 RAG 质量与性能：当前使用的是本地 hash 嵌入函数（`rag/embedding.py`），可考虑增加更强的本地 embedding 实现或对检索结果做更精细的重排序；同时为 `write_chapter` 的检索结果加缓存（按 `project_id + current_chapter_index` + 参数组合），避免反复拼 prompt。
 2. Markdown 渲染增强：前端 `renderMarkdown()` 目前属于轻量替换（标题/加粗/图片/段落），可补齐代码块、列表、链接、换行语义等，减少正文渲染差异。
 3. 插图管线的工程化：当前为「单张插图 + OpenAI 生图」，失败即跳过；策划侧强调情节相关锚点与大纲上下文，插入侧对锚点做多策略匹配，减少图总落在文末；可进一步做缓存去重、多图、或非 OpenAI 后端适配。
-4. 更稳的并发与任务控制：当前按钮禁用依赖前端请求 pending；可在后端加上“同一 `project_id` 的写操作互斥锁/队列”，避免同时触发导致状态写回顺序问题。
+4. 更稳的并发与任务控制：大纲接口已具备 `outline_job` 运行状态、心跳与判死接管，下一步可把同样机制推广到续写/重写等其它长耗时写操作。
 5. 加强回归用例覆盖：现有 Playwright（`e2e/smoke.spec.ts`、`regression.spec.ts`、`stream-progress.spec.ts` 等）已覆盖首页控件、按钮可见性与 NDJSON 流式消费等关键点；下一步可以补 `回滚 tail` 删除行为、`rewrite` 可选更新大纲路径、插图 enable 分支的 UI/后端接口联动回归（仍建议尽量避免依赖真实 LLM）。
 6. 流式 NDJSON 背压：`stream=1` / `stream=true` 下 token 级进度极高频，后端 `ndjson_with_progress` 已用无界队列避免与慢客户端之间的死锁；若仍见“卡住”，可抓浏览器 Network 是否仍在收字节、后端日志是否停在某一 LLM 步骤。
 

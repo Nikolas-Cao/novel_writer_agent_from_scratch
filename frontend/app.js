@@ -723,6 +723,9 @@ const state = {
   outlineGeneratedUntil: -1,
   outlineWindowSize: 10,
   totalChapters: 0,
+  currentProjectSelectedPlotSummary: "",
+  outlineJob: { status: "idle", job_id: "", started_at: 0, last_heartbeat_at: 0 },
+  outlineCheckpoint: { phase: null, input_fingerprint: "", updated_at: 0 },
   isGeneratingOutline: false,
   isChapterWriteInProgress: false,
   isOutlineWindowGenerating: false,
@@ -748,6 +751,21 @@ const state = {
   styleConstraint: "",
   currentProjectProgress: "intent_only",
 };
+
+const OUTLINE_JOB_STALE_AFTER_MS = 10 * 60 * 1000;
+
+function isOutlineJobRunningFresh() {
+  const job = state.outlineJob || {};
+  if (String(job.status || "") !== "running") return false;
+  const lastHbMs = Number(job.last_heartbeat_at || 0) * 1000;
+  if (!Number.isFinite(lastHbMs) || lastHbMs <= 0) return false;
+  return Date.now() - lastHbMs < OUTLINE_JOB_STALE_AFTER_MS;
+}
+
+function hasOutlineCheckpointToResume() {
+  const cp = state.outlineCheckpoint || {};
+  return Boolean(String(cp.phase || "").trim());
+}
 
 const el = {
   layout: document.querySelector(".layout"),
@@ -1283,14 +1301,26 @@ function syncSummarySourceState() {
     state.selectedIdea = "";
   }
   const hasSelectedIdea = String(state.selectedIdea || "").trim().length > 0;
-  const hasOutlineSource = hasCustomSummary || hasSelectedIdea;
+  const hasSavedSummary = String(state.currentProjectSelectedPlotSummary || "").trim().length > 0;
+  const hasOutlineSource = hasCustomSummary || hasSelectedIdea || hasSavedSummary;
+  const canResume = hasOutlineCheckpointToResume();
+  const runningFresh = isOutlineJobRunningFresh();
   if (el.btnGenerateIdeas) {
     // 自定义概要与候选概要必须二选一；有自定义输入时禁用“生成概要”避免语义冲突。
     el.btnGenerateIdeas.disabled = state.isGeneratingOutline || hasCustomSummary;
   }
   if (el.btnGenerateOutline) {
-    // 没有任何可用概要来源时，禁止触发“生成大纲”。
-    el.btnGenerateOutline.disabled = state.isGeneratingOutline || !hasOutlineSource;
+    if (state.isGeneratingOutline) {
+      el.btnGenerateOutline.textContent = "生成大纲中...";
+      el.btnGenerateOutline.disabled = true;
+    } else if (runningFresh) {
+      el.btnGenerateOutline.textContent = "生成大纲中...";
+      el.btnGenerateOutline.disabled = true;
+    } else {
+      el.btnGenerateOutline.textContent = canResume ? "继续生成大纲" : "生成大纲";
+      // 没有可用概要来源且也不存在可恢复 checkpoint 时，禁止触发。
+      el.btnGenerateOutline.disabled = !hasOutlineSource && !canResume;
+    }
   }
   if (!hasCustomSummary && !state.selectedIdea && Array.isArray(state.plotIdeas) && state.plotIdeas.length > 0) {
     state.selectedIdea = state.plotIdeas[0];
@@ -1507,6 +1537,7 @@ async function openProject(projectId) {
     }
     const ideas = Array.isArray(p.plot_ideas) ? p.plot_ideas : [];
     const selectedSummary = String((p && p.selected_plot_summary) || "").trim();
+    state.currentProjectSelectedPlotSummary = selectedSummary;
     state.selectedIdea = ideas.includes(selectedSummary) ? selectedSummary : "";
     if (el.customSummary && selectedSummary && !state.selectedIdea) {
       el.customSummary.value = selectedSummary;
@@ -1535,6 +1566,14 @@ async function openProject(projectId) {
     state.totalChapters = Number.isFinite(Number(p.total_chapters))
       ? Number(p.total_chapters)
       : 0;
+    state.outlineJob =
+      p && p.outline_job && typeof p.outline_job === "object"
+        ? { ...p.outline_job }
+        : { status: "idle", job_id: "", started_at: 0, last_heartbeat_at: 0 };
+    state.outlineCheckpoint =
+      p && p.outline_checkpoint && typeof p.outline_checkpoint === "object"
+        ? { ...p.outline_checkpoint }
+        : { phase: null, input_fingerprint: "", updated_at: 0 };
     state.styleConstraint = String((p && p.style_constraint) || "").trim();
     updateOutlineWindowRangeHint();
     await loadKnowledgeBases();
@@ -1571,6 +1610,9 @@ async function openProject(projectId) {
     state.outlineGeneratedUntil = -1;
     state.outlineWindowSize = 10;
     state.totalChapters = 0;
+    state.currentProjectSelectedPlotSummary = "";
+    state.outlineJob = { status: "idle", job_id: "", started_at: 0, last_heartbeat_at: 0 };
+    state.outlineCheckpoint = { phase: null, input_fingerprint: "", updated_at: 0 };
     state.styleConstraint = "";
     updateOutlineWindowRangeHint();
     if (el.tokenUsage) el.tokenUsage.innerHTML = "";
@@ -2148,8 +2190,13 @@ async function generateOutline() {
     setStatus("大纲生成中，请稍候...");
     return;
   }
+  if (isOutlineJobRunningFresh()) {
+    setStatus("当前项目已有大纲任务在运行，请稍后刷新查看进度");
+    syncSummarySourceState();
+    return;
+  }
   const custom = el.customSummary.value.trim();
-  const selected = custom || state.selectedIdea;
+  const selected = custom || state.selectedIdea || String(state.currentProjectSelectedPlotSummary || "").trim();
   if (!selected) {
     setStatus("请先选择一条剧情概要，或填写自定义概要");
     return;
@@ -2181,6 +2228,7 @@ async function generateOutline() {
       {
         selected_plot_summary: selected,
         ...(totalChapters ? { total_chapters: totalChapters } : {}),
+        force_restart: false,
       },
       applyProgressToStatus
     );

@@ -86,3 +86,9 @@ KB_RETRIEVE_FTS_K = int(os.getenv("KB_RETRIEVE_FTS_K", "12"))
 KB_RETRIEVE_FINAL_K = int(os.getenv("KB_RETRIEVE_FINAL_K", "8"))
 KB_TOOL_LOOP_MAX_CALLS = int(os.getenv("KB_TOOL_LOOP_MAX_CALLS", "2"))
 
+# ----- 大纲任务状态心跳（用于“继续未完成任务”判定） -----
+# 运行中任务每隔 N 秒刷新一次 last_heartbeat_at。
+OUTLINE_HEARTBEAT_INTERVAL_S = max(10, int(os.getenv("OUTLINE_HEARTBEAT_INTERVAL_S", "180")))
+# 运行中任务超过该秒数无心跳，视为僵死，可被新请求接管。
+OUTLINE_JOB_STALE_AFTER_S = max(60, int(os.getenv("OUTLINE_JOB_STALE_AFTER_S", "600")))
+
