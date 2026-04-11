@@ -30,6 +30,10 @@
       <h2>新建小说</h2>
       <label>创作意图</label>
       <textarea id="instruction-input" rows="4" placeholder="例如：都市悬疑，雨夜失踪案"></textarea>
+      <p id="create-kb-selection-hint" class="create-kb-selection-hint" hidden></p>
+      <div class="row">
+        <button type="button" id="btn-open-create-kb-picker">参考知识库</button>
+      </div>
       <div class="row">
         <button type="button" id="btn-generate-ideas">生成概要</button>
       </div>
@@ -49,9 +53,6 @@
         step="1"
         placeholder="例如：100"
       />
-      <label for="create-kb-select">参考知识库（可多选）</label>
-      <select id="create-kb-select" multiple></select>
-      <p class="kb-select-hint">可多选知识库；“无”与其他选项互斥。</p>
       <div class="row">
         <button type="button" id="btn-generate-outline">生成大纲</button>
       </div>
@@ -253,6 +254,23 @@
         <pre id="kb-assets-view" class="kb-assets-view"></pre>
         <textarea id="kb-assets-editor" class="kb-assets-editor" hidden spellcheck="false"></textarea>
         <div id="kb-assets-edit-error" class="kb-assets-edit-error" hidden></div>
+      </div>
+    </div>
+  </div>
+  <div id="create-kb-picker-modal" class="modal" hidden>
+    <div class="modal-backdrop" data-close-create-kb-picker="true"></div>
+    <div class="modal-dialog modal-dialog-sm" role="dialog" aria-modal="true" aria-labelledby="create-kb-picker-title">
+      <div class="modal-head">
+        <h3 id="create-kb-picker-title">选择参考知识库（可多选）</h3>
+        <button type="button" id="btn-close-create-kb-picker" class="btn-modal-close">关闭</button>
+      </div>
+      <div class="modal-content create-kb-picker-content">
+        <p class="create-kb-picker-tip">可选择多个知识库，未选择时将按默认方式生成。</p>
+        <div id="create-kb-card-list" class="create-kb-card-list"></div>
+        <div class="row">
+          <button type="button" id="btn-cancel-create-kb-picker">取消</button>
+          <button type="button" id="btn-confirm-create-kb-picker">确定</button>
+        </div>
       </div>
     </div>
   </div>

@@ -51,10 +51,18 @@ def _describe_keys(keys: Iterable[str]) -> str:
     return ", ".join(sorted(set(keys)))
 
 
-def _assert_exact_keys(value: Dict[str, Any], required_keys: set[str], path: str) -> None:
+def _assert_exact_keys(
+    value: Dict[str, Any],
+    required_keys: set[str],
+    path: str,
+    optional_keys: set[str] | None = None,
+) -> None:
     actual = set(value.keys())
     missing = sorted(required_keys - actual)
-    extras = sorted(actual - required_keys)
+    allowed = set(required_keys)
+    if optional_keys:
+        allowed.update(optional_keys)
+    extras = sorted(actual - allowed)
     if missing:
         raise ValueError(f"{path} 缺少字段：{', '.join(missing)}")
     if extras:
@@ -96,7 +104,8 @@ def validate_assets_payload(payload: Any) -> Dict[str, Any]:
             path = f"assets.{field_name}[{idx}]"
             if not isinstance(item, dict):
                 raise ValueError(f"{path} 必须是对象")
-            _assert_exact_keys(item, expected_keys, path)
+            optional_keys = {"char_approx_end"} if field_name == "leaf_summaries" else None
+            _assert_exact_keys(item, expected_keys, path, optional_keys=optional_keys)
             out_item: Dict[str, Any] = {}
             for key, expected_type in schema:
                 value = item.get(key)
@@ -107,6 +116,9 @@ def validate_assets_payload(payload: Any) -> Dict[str, Any]:
                     out_item[key] = list(value)
                 else:
                     out_item[key] = value
+            if field_name == "leaf_summaries" and "char_approx_end" in item:
+                _require_type(item["char_approx_end"], (int, float), f"{path}.char_approx_end")
+                out_item["char_approx_end"] = item["char_approx_end"]
             normalized_items.append(out_item)
         normalized[field_name] = normalized_items
     return normalized

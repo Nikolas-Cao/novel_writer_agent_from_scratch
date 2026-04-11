@@ -978,7 +978,14 @@ def create_app(
             logger.info("[生成剧情概要] start project=%s", project_id)
             await emit("plot_ideas", "正在生成剧情概要候选（LLM）…")
             try:
-                out = await generate_plot_ideas_node(state, llm=tp)
+                kb_context = ""
+                if state.get("kb_enabled") and state.get("selected_kb_ids"):
+                    kb_context = await build_kb_context_for_outline(
+                        kb_ids=list(state.get("selected_kb_ids") or []),
+                        plot_summary=str(req.instruction or ""),
+                        retriever=global_kb_retriever,
+                    )
+                out = await generate_plot_ideas_node(state, llm=tp, kb_context=kb_context or None)
             except Exception as exc:
                 emit_project_event(
                     project_id,

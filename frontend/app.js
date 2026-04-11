@@ -1,5 +1,4 @@
 const API_BASE = typeof window !== "undefined" && window.API_BASE ? window.API_BASE : "";
-const KB_NONE_VALUE = "__none__";
 
 function installLiveServerReloadGuard() {
   if (typeof window === "undefined") return;
@@ -271,49 +270,93 @@ async function apiUploadMultipart(urlPath, file) {
   return resp.json();
 }
 
-function applyCreateKbMutualExclusion() {
-  if (!el.createKbSelect) return;
-  const options = Array.from(el.createKbSelect.options);
-  const noneOpt = options.find((opt) => opt.value === KB_NONE_VALUE);
-  if (!noneOpt) return;
-  const selectedValues = options.filter((opt) => opt.selected).map((opt) => opt.value);
-  if (selectedValues.includes(KB_NONE_VALUE) && selectedValues.length > 1) {
-    options.forEach((opt) => {
-      opt.selected = opt.value === KB_NONE_VALUE;
-    });
-    return;
+function sanitizeCreateKbSelection(ids) {
+  const kbIdSet = new Set((state.knowledgeBases || []).map((kb) => String(kb.kb_id || "")).filter(Boolean));
+  const uniq = [];
+  for (const raw of Array.isArray(ids) ? ids : []) {
+    const id = String(raw || "");
+    if (!id || !kbIdSet.has(id) || uniq.includes(id)) continue;
+    uniq.push(id);
   }
-  const hasOther = selectedValues.some((v) => v !== KB_NONE_VALUE);
-  if (hasOther && noneOpt.selected) {
-    noneOpt.selected = false;
-  }
+  return uniq;
 }
 
 function getSelectedKbIdsForCreate() {
-  if (!el.createKbSelect) return [];
-  applyCreateKbMutualExclusion();
-  const selectedValues = Array.from(el.createKbSelect.selectedOptions).map((opt) => String(opt.value || ""));
-  if (!selectedValues.length || selectedValues.includes(KB_NONE_VALUE)) return [];
-  return selectedValues;
+  return sanitizeCreateKbSelection(state.createDraftSelectedKbIds);
 }
 
-function populateCreateKbMultiSelect() {
-  if (!el.createKbSelect) return;
-  const prevSelected = new Set(Array.from(el.createKbSelect.selectedOptions).map((opt) => String(opt.value || "")));
-  el.createKbSelect.innerHTML = "";
-  const noneOpt = document.createElement("option");
-  noneOpt.value = KB_NONE_VALUE;
-  noneOpt.textContent = "无";
-  noneOpt.selected = prevSelected.size === 0 || prevSelected.has(KB_NONE_VALUE);
-  el.createKbSelect.appendChild(noneOpt);
+function getKbDisplayNameById(kbId) {
+  const matched = (state.knowledgeBases || []).find((kb) => String(kb.kb_id || "") === String(kbId || ""));
+  if (!matched) return String(kbId || "");
+  return String(matched.name || matched.kb_id || kbId);
+}
+
+function renderCreateKbSelectionHint() {
+  if (!el.createKbSelectionHint) return;
+  const selectedKbIds = getSelectedKbIdsForCreate();
+  if (!selectedKbIds.length) {
+    el.createKbSelectionHint.hidden = true;
+    el.createKbSelectionHint.textContent = "";
+    return;
+  }
+  const kbNames = selectedKbIds.map((kbId) => getKbDisplayNameById(kbId)).filter(Boolean);
+  el.createKbSelectionHint.textContent = `当前小说创作参考知识库：${kbNames.join("，")}`;
+  el.createKbSelectionHint.hidden = false;
+}
+
+function renderCreateKbPickerCards() {
+  if (!el.createKbCardList) return;
+  const draftSelected = new Set(sanitizeCreateKbSelection(state.createKbPickerDraftIds));
+  el.createKbCardList.innerHTML = "";
+  if (!state.knowledgeBases.length) {
+    el.createKbCardList.innerHTML = '<p class="create-kb-picker-tip">暂无可选知识库，请先在“知识库”中创建。</p>';
+    return;
+  }
   state.knowledgeBases.forEach((kb) => {
-    const opt = document.createElement("option");
-    opt.value = kb.kb_id;
-    opt.textContent = kb.name || kb.kb_id;
-    opt.selected = prevSelected.has(kb.kb_id);
-    el.createKbSelect.appendChild(opt);
+    const kbId = String(kb.kb_id || "");
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "create-kb-card";
+    card.setAttribute("data-kb-id", kbId);
+    const isSelected = draftSelected.has(kbId);
+    if (isSelected) card.classList.add("is-selected");
+    card.innerHTML = `
+      <div class="create-kb-card-head">
+        <strong>${escapeHtml(String(kb.name || kbId))}</strong>
+        <span class="create-kb-card-badge">${isSelected ? "✓" : ""}</span>
+      </div>
+      <p class="create-kb-card-meta">${escapeHtml(kbId)}</p>
+    `;
+    card.addEventListener("click", () => {
+      if (!kbId) return;
+      const next = new Set(sanitizeCreateKbSelection(state.createKbPickerDraftIds));
+      if (next.has(kbId)) {
+        next.delete(kbId);
+      } else {
+        next.add(kbId);
+      }
+      state.createKbPickerDraftIds = Array.from(next);
+      renderCreateKbPickerCards();
+    });
+    el.createKbCardList.appendChild(card);
   });
-  applyCreateKbMutualExclusion();
+}
+
+function openCreateKbPickerModal() {
+  if (!el.createKbPickerModal) return;
+  void loadKnowledgeBases();
+  state.createKbPickerDraftIds = [...getSelectedKbIdsForCreate()];
+  renderCreateKbPickerCards();
+  el.createKbPickerModal.hidden = false;
+}
+
+function closeCreateKbPickerModal({ commit = false } = {}) {
+  if (!el.createKbPickerModal) return;
+  if (commit) {
+    state.createDraftSelectedKbIds = sanitizeCreateKbSelection(state.createKbPickerDraftIds);
+    renderCreateKbSelectionHint();
+  }
+  el.createKbPickerModal.hidden = true;
 }
 
 async function loadKnowledgeBases() {
@@ -321,7 +364,13 @@ async function loadKnowledgeBases() {
     const data = await api.get("/knowledge-bases");
     state.knowledgeBases = data.knowledge_bases || [];
     renderKbList();
-    populateCreateKbMultiSelect();
+    state.createDraftSelectedKbIds = sanitizeCreateKbSelection(state.createDraftSelectedKbIds);
+    state.createKbPickerDraftIds = sanitizeCreateKbSelection(state.createKbPickerDraftIds);
+    if (!el.createKbPickerModal || el.createKbPickerModal.hidden) {
+      renderCreateKbSelectionHint();
+    } else {
+      renderCreateKbPickerCards();
+    }
     populateKbAssetsSelect();
     if (el.kbAssetsPanel) {
       el.kbAssetsPanel.hidden = state.knowledgeBases.length === 0;
@@ -515,7 +564,7 @@ function validateKbAssetsPayload(payload) {
     timeline: { order: "number", event: "string", actors: "string" },
     world_rules: { rule: "string", note: "string" },
     core_facts: { fact: "string", importance: "string" },
-    leaf_summaries: { id: "string", summary: "string" },
+    leaf_summaries: { id: "string", summary: "string", char_approx_end: "number?" },
     section_summaries: { id: "string", summary: "string" },
   };
 
@@ -530,18 +579,22 @@ function validateKbAssetsPayload(payload) {
         throw new Error(`${itemPath} 必须是对象`);
       }
       const expectKeys = Object.keys(schema);
+      const requiredKeys = expectKeys.filter((k) => !String(schema[k]).endsWith("?"));
       const itemKeys = Object.keys(item);
-      const itemMissing = expectKeys.filter((k) => !itemKeys.includes(k));
+      const itemMissing = requiredKeys.filter((k) => !itemKeys.includes(k));
       const itemExtras = itemKeys.filter((k) => !expectKeys.includes(k));
       if (itemMissing.length) throw new Error(`${itemPath} 缺少字段：${itemMissing.join(", ")}`);
       if (itemExtras.length) throw new Error(`${itemPath} 包含未定义字段：${itemExtras.join(", ")}`);
       expectKeys.forEach((k) => {
         const typeRule = schema[k];
         const value = item[k];
+        if (String(typeRule).endsWith("?") && typeof value === "undefined") {
+          return;
+        }
         if (typeRule === "string" && typeof value !== "string") {
           throw new Error(`${itemPath}.${k} 必须是字符串`);
         }
-        if (typeRule === "number" && typeof value !== "number") {
+        if ((typeRule === "number" || typeRule === "number?") && typeof value !== "number") {
           throw new Error(`${itemPath}.${k} 必须是数字`);
         }
         if (typeRule === "string[]") {
@@ -675,6 +728,10 @@ const state = {
   /** 用于防止 openChapter 的请求乱序覆盖 UI */
   openChapterRequestSeq: 0,
   knowledgeBases: [],
+  /** 新建阶段已确认选择的知识库ID列表 */
+  createDraftSelectedKbIds: [],
+  /** 弹窗中的临时多选列表（仅在点击“确定”后落盘到 createDraftSelectedKbIds） */
+  createKbPickerDraftIds: [],
   kbAssetsCurrentKbId: "",
   kbAssetsLastLoadedAssets: null,
   kbAssetsEditing: false,
@@ -699,10 +756,16 @@ const el = {
   plotIdeasSection: document.getElementById("plot-ideas-section"),
   projectList: document.getElementById("project-list"),
   instruction: document.getElementById("instruction-input"),
+  createKbSelectionHint: document.getElementById("create-kb-selection-hint"),
   plotIdeas: document.getElementById("plot-ideas"),
   customSummary: document.getElementById("custom-summary-input"),
   totalChapters: document.getElementById("total-chapters-input"),
-  createKbSelect: document.getElementById("create-kb-select"),
+  btnOpenCreateKbPicker: document.getElementById("btn-open-create-kb-picker"),
+  createKbPickerModal: document.getElementById("create-kb-picker-modal"),
+  createKbCardList: document.getElementById("create-kb-card-list"),
+  btnCloseCreateKbPicker: document.getElementById("btn-close-create-kb-picker"),
+  btnCancelCreateKbPicker: document.getElementById("btn-cancel-create-kb-picker"),
+  btnConfirmCreateKbPicker: document.getElementById("btn-confirm-create-kb-picker"),
   selectedIdeaView: document.getElementById("selected-idea-view"),
   projectMeta: document.getElementById("project-meta"),
   tokenUsage: document.getElementById("token-usage"),
@@ -1226,6 +1289,7 @@ function setOutlineGeneratingUI(isGenerating) {
     el.instruction,
     el.customSummary,
     el.btnGenerateOutline,
+    el.btnOpenCreateKbPicker,
   ];
   lockTargets.forEach((node) => {
     if (node) node.disabled = state.isGeneratingOutline;
@@ -1445,6 +1509,8 @@ async function openProject(projectId) {
     renderProjectList(state.projectIds);
     state.currentProjectKbBindLocked = projectHasOutlineForKbLock(p);
     state.currentProjectKbIds = Array.isArray(p.selected_kb_ids) ? p.selected_kb_ids.map(String) : [];
+    state.createDraftSelectedKbIds = [...state.currentProjectKbIds];
+    state.createKbPickerDraftIds = [...state.createDraftSelectedKbIds];
     state.outlineGeneratedUntil = Number.isFinite(Number(p.outline_generated_until))
       ? Number(p.outline_generated_until)
       : -1;
@@ -1485,6 +1551,8 @@ async function openProject(projectId) {
     state.currentProjectProgress = "intent_only";
     state.currentProjectKbBindLocked = false;
     state.currentProjectKbIds = [];
+    state.createDraftSelectedKbIds = [];
+    state.createKbPickerDraftIds = [];
     state.outlineGeneratedUntil = -1;
     state.outlineWindowSize = 10;
     state.totalChapters = 0;
@@ -1612,7 +1680,23 @@ async function refreshProjectsAndHideDetail() {
   updateDetailLayout(null);
   setDetailPanelVisibility(false);
   await loadProjects();
+  resetCreateFormFields();
   await loadKnowledgeBases();
+}
+
+/**
+ * 进入「无当前项目 / 新建」流程时重置左侧新建表单。
+ *
+ * 思路：创作意图(instruction)、目标章节数(total_chapters) 等控件是共享 DOM，打开项目时由 openProject 从服务端填充；
+ * 若仅清空 state 而不重置输入框，上次打开的项目内容会残留在 textarea/number 中（用户感知为「新建项目仍有旧稿」）。
+ */
+function resetCreateFormFields() {
+  if (el.instruction) el.instruction.value = "";
+  if (el.customSummary) el.customSummary.value = "";
+  if (el.totalChapters) el.totalChapters.value = "";
+  state.createDraftSelectedKbIds = [];
+  state.createKbPickerDraftIds = [];
+  renderCreateKbSelectionHint();
 }
 
 function startNewProject() {
@@ -1631,7 +1715,7 @@ function startNewProject() {
   updateDetailLayout(null);
   setDetailPanelVisibility(false);
   setPlotIdeasSectionVisibility(false);
-  if (el.customSummary) el.customSummary.value = "";
+  resetCreateFormFields();
   syncSummarySourceState();
   setStatus("请输入创作意图后，点击「生成概要」（或先「新建项目」再生成）");
   if (el.instruction) el.instruction.focus();
@@ -2298,6 +2382,10 @@ function bindEvents() {
   bindClick(el.btnRefreshProjects, refreshProjectsAndHideDetail);
   bindClick(el.btnNewProject, startNewProject);
   bindClick(el.btnGenerateIdeas, generateIdeas);
+  bindClick(el.btnOpenCreateKbPicker, openCreateKbPickerModal);
+  bindClick(el.btnCloseCreateKbPicker, () => closeCreateKbPickerModal({ commit: false }));
+  bindClick(el.btnCancelCreateKbPicker, () => closeCreateKbPickerModal({ commit: false }));
+  bindClick(el.btnConfirmCreateKbPicker, () => closeCreateKbPickerModal({ commit: true }));
   bindClick(el.btnGenerateOutline, generateOutline);
   bindClick(el.btnGenerateOutlineRange, generateOutlineRange);
   bindClick(el.btnNextChapter, writeNextChapter);
@@ -2350,12 +2438,6 @@ function bindEvents() {
       syncSummarySourceState();
     });
   }
-  if (el.createKbSelect) {
-    el.createKbSelect.addEventListener("change", () => {
-      applyCreateKbMutualExclusion();
-    });
-  }
-
   // 防御式兜底：即使未来引入了 form，也避免默认提交触发整页刷新。
   document.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -2424,6 +2506,13 @@ function bindEvents() {
       }
     });
   }
+  if (el.createKbPickerModal) {
+    el.createKbPickerModal.addEventListener("click", (event) => {
+      if (event.target && event.target.getAttribute("data-close-create-kb-picker") === "true") {
+        closeCreateKbPickerModal({ commit: false });
+      }
+    });
+  }
   document.addEventListener("click", (event) => {
     if (!el.projectContextMenu || el.projectContextMenu.hidden) return;
     if (el.projectContextMenu.contains(event.target)) return;
@@ -2444,6 +2533,7 @@ function bindEvents() {
       closeDeleteModal();
       closeKnowledgeBaseModal();
       closeKbAssetsModal();
+      closeCreateKbPickerModal({ commit: false });
     }
     if (event.key === "Enter" && !el.projectRenameModal.hidden) {
       const target = event.target;

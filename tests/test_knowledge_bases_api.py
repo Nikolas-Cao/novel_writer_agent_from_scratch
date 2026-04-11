@@ -37,7 +37,7 @@ def _sample_assets_payload():
         "timeline": [{"order": 1, "event": "第一幕事件", "actors": "陈某, 李某"}],
         "world_rules": [{"rule": "夜间禁火", "note": "违反会触发巡逻"}],
         "core_facts": [{"fact": "主角害怕高处", "importance": "high"}],
-        "leaf_summaries": [{"id": "leaf-1", "summary": "叶子摘要"}],
+        "leaf_summaries": [{"id": "leaf-1", "char_approx_end": 8407, "summary": "叶子摘要"}],
         "section_summaries": [{"id": "section-1", "summary": "段落摘要"}],
     }
 
@@ -164,6 +164,7 @@ def test_save_knowledge_assets_summary_and_retriever_precedence():
     assets = r.json()["assets"]
     assert assets["global_summary"] == payload["global_summary"]
     assert assets["characters"][0]["name"] == "陈某"
+    assert assets["leaf_summaries"][0]["char_approx_end"] == 8407
     assert assets.get("by_doc") == {}
 
     retriever = GlobalKbRetriever(d["vector"], KnowledgeBaseStore(d["vector"]))

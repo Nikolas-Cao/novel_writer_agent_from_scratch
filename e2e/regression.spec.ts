@@ -419,6 +419,38 @@ test.describe("UI regressions from past chats", () => {
     await expect(page.locator("#global-status")).toContainText("大纲生成完成", { timeout: 15000 });
   });
 
+  test("窗口高度过小时：创作意图输入框应保持最小可读高度", async ({ page }) => {
+    await page.route("**/projects", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ projects: [] }),
+      });
+    });
+    await page.route("**/knowledge-bases", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ knowledge_bases: [] }),
+      });
+    });
+
+    await page.setViewportSize({ width: 1280, height: 480 });
+    await page.goto("/");
+    await expect(page.locator("#instruction-input")).toBeVisible();
+    const box = await page.locator("#instruction-input").boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.height).toBeGreaterThanOrEqual(110);
+  });
+
   test("项目列表保持固定宽度，右侧区域随窗口宽度自适应", async ({ page }) => {
     await page.route("**/projects", async (route) => {
       if (route.request().method() !== "GET") {
@@ -621,6 +653,72 @@ test.describe("UI regressions from past chats", () => {
     await page.locator(`.project-open-btn[data-project-id="${outlinedProjectId}"]`).click();
     await expect(page.locator("#global-status")).toContainText(`已打开 ${outlinedProjectId}`);
     await expect(page.locator("#plot-ideas-section")).toBeHidden();
+  });
+
+  test("点击新建项目：应清空创作意图与目标章节等新建区输入", async ({ page }) => {
+    const pid = "p-clear-on-new";
+    await page.route("**/knowledge-bases**", async (route) => {
+      if (route.request().method() === "GET") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ knowledge_bases: [] }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+    await page.route("**/projects**", async (route) => {
+      const req = route.request();
+      const url = new URL(req.url());
+      const method = req.method();
+      const path = url.pathname.replace(/\/$/, "") || "/";
+      if (method === "GET" && path === "/projects") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ projects: [{ project_id: pid, created_at: 1700000000 }] }),
+        });
+        return;
+      }
+      if (method === "GET" && path === `/projects/${pid}`) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            project_id: pid,
+            instruction: "打开项目后残留的创作意图文案",
+            plot_ideas: [],
+            selected_plot_summary: "",
+            outline_structure: { volumes: [] },
+            chapters: [],
+            current_chapter_index: 0,
+            total_chapters: 200,
+            chapter_word_target: 3000,
+            enable_chapter_illustrations: false,
+            created_at: 1700000000,
+            token_usage: {},
+            selected_kb_ids: [],
+            kb_enabled: false,
+            canon_overrides: [],
+          }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    await page.goto("/");
+    await page.locator(`.project-open-btn[data-project-id="${pid}"]`).click();
+    await expect(page.locator("#global-status")).toContainText(`已打开 ${pid}`);
+    await expect(page.locator("#instruction-input")).toHaveValue("打开项目后残留的创作意图文案");
+    await expect(page.locator("#total-chapters-input")).toHaveValue("200");
+
+    await page.locator("#btn-new-project").click();
+    await expect(page.locator("#instruction-input")).toHaveValue("");
+    await expect(page.locator("#total-chapters-input")).toHaveValue("");
+    await expect(page.locator("#custom-summary-input")).toHaveValue("");
+    await expect(page.locator("#create-kb-selection-hint")).toBeHidden();
   });
 
 
@@ -1428,7 +1526,7 @@ test.describe("知识库入口弹窗化", () => {
     await expect(page.locator("#kb-list .kb-item strong")).toContainText("武侠设定集");
   });
 
-  test("新建小说区提供知识库多选，且“无”与其他选项互斥", async ({ page }) => {
+  test("新建小说区通过按钮弹框选择参考知识库，并在意图下方展示已选提示", async ({ page }) => {
     await page.route("**/projects", async (route) => {
       if (route.request().method() !== "GET") {
         await route.continue();
@@ -1458,15 +1556,19 @@ test.describe("知识库入口弹窗化", () => {
     });
 
     await page.goto("/");
-    const select = page.locator("#create-kb-select");
-    await expect(select).toBeVisible();
-    await expect(select.locator("option[value='__none__']")).toBeVisible();
-    await expect(select.locator("option[value='kb-1']")).toBeVisible();
+    await expect(page.locator("#create-kb-selection-hint")).toBeHidden();
+    await page.locator("#btn-open-create-kb-picker").click();
+    await expect(page.locator("#create-kb-picker-modal")).toBeVisible();
+    await expect(page.locator(".create-kb-card[data-kb-id='kb-1']")).toBeVisible();
+    await expect(page.locator(".create-kb-card[data-kb-id='kb-2']")).toBeVisible();
 
-    await select.selectOption(["__none__", "kb-1"]);
-    await expect(select).toHaveValues(["__none__"]);
-    await select.selectOption(["kb-1", "kb-2"]);
-    await expect(select).toHaveValues(["kb-1", "kb-2"]);
+    await page.locator(".create-kb-card[data-kb-id='kb-1']").click();
+    await page.locator(".create-kb-card[data-kb-id='kb-2']").click();
+    await page.locator("#btn-confirm-create-kb-picker").click();
+
+    await expect(page.locator("#create-kb-picker-modal")).toBeHidden();
+    await expect(page.locator("#create-kb-selection-hint")).toBeVisible();
+    await expect(page.locator("#create-kb-selection-hint")).toContainText("当前小说创作参考知识库：世界观设定，角色档案");
   });
 
   test("生成概要与生成大纲创建项目时携带知识库多选结果", async ({ page }) => {
@@ -1537,14 +1639,17 @@ test.describe("知识库入口弹窗化", () => {
 
     await page.goto("/");
     await page.locator("#instruction-input").fill("测试意图");
-    await page.locator("#create-kb-select").selectOption(["kb-1", "kb-2"]);
+    await page.locator("#btn-open-create-kb-picker").click();
+    await page.locator(".create-kb-card[data-kb-id='kb-1']").click();
+    await page.locator(".create-kb-card[data-kb-id='kb-2']").click();
+    await page.locator("#btn-confirm-create-kb-picker").click();
     await page.locator("#btn-generate-ideas").click();
     await expect(page.locator("#global-status")).toContainText("概要已生成", { timeout: 15000 });
     expect(createBodies[0].selected_kb_ids).toEqual(["kb-1", "kb-2"]);
 
     await page.locator("#btn-new-project").click();
     await page.locator("#instruction-input").fill("测试大纲");
-    await page.locator("#create-kb-select").selectOption(["__none__"]);
+    await expect(page.locator("#create-kb-selection-hint")).toBeHidden();
     await page.locator("#custom-summary-input").fill("这是一条自定义概要");
     await page.locator("#btn-generate-outline").click();
     await expect(page.locator("#global-status")).toContainText("大纲生成完成", { timeout: 15000 });

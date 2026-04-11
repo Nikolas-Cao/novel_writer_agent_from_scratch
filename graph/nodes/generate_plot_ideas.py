@@ -21,6 +21,7 @@ from state import NovelProjectState
 async def generate_plot_ideas_node(
     state: NovelProjectState,
     llm: Optional[Any] = None,
+    kb_context: Optional[str] = None,
 ) -> Dict[str, List[str]]:
     planner = llm or create_planner_llm()
     instruction = state.get("instruction", "").strip()
@@ -34,6 +35,8 @@ async def generate_plot_ideas_node(
         '{"plot_ideas":["概要1","概要2"]}\n\n'
         f"用户创作意图：{instruction}"
     )
+    if kb_context:
+        prompt = f"{prompt}\n\n{kb_context}"
     ideas: List[str] = []
     text = ""
     pid = (state.get("project_id") or "").strip() or "(no_project)"
