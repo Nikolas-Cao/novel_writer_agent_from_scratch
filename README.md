@@ -11,7 +11,7 @@
 ## 🧩 项目简介（30 秒看懂）
 
 - 从创作意图生成剧情概要与结构化大纲
-- 逐章续写/润色；最新章支持反馈重写
+- 逐章续写/润色；写章与润色默认带「章末约束」减轻套路化升华收尾（可与项目级文风并存）；最新章支持反馈重写
 - 结合本地 RAG 与人物图谱上下文保证连续性
 - **同人知识库（可选）**：上传全局 `.txt` / `.md` 原著参考，项目勾选绑定；写纲/写章/润色时统一按激进路线仅注入分层摘要，**二创设定优先于原著**；大纲生成后绑定锁定
 
@@ -42,6 +42,7 @@ copy .env-sample .env
 - `DEFAULT_TOTAL_CHAPTERS`：默认目标章节数（默认 100）
 - `PLOT_IDEAS_COUNT`：生成剧情概要候选数量（默认 5）
 - `RAG_PREVIOUS_CHAPTERS`：写章时检索前文章节摘要数量（默认 5）
+- `WRITE_CHAPTER_PREV_TAIL_CHARS`：写第 n 章时注入第 n-1 章正文末尾字符数，便于承接悬置动作（默认 1200；设为 `0` 关闭）
 - `CHARACTER_GRAPH_RECENT_CHAPTERS`：写章时人物关系摘要的章节滑窗宽度（默认 5）
 - `IMAGE_GEN_API_KEY` / `IMAGE_GEN_BASE_URL` / `IMAGE_GEN_MODEL` / `IMAGE_GEN_SIZE` / `IMAGE_GEN_TIMEOUT_S`：章节插图走 OpenAI Images（`IMAGE_GEN_API_KEY` 默认可回退 `OPENAI_API_KEY` / `PLANNER_API_KEY`）；生图失败则本张插图跳过
 - `PLAN_OUTLINE_SINGLE_CALL_MAX`：超过该章节数则长篇大纲改为「极简骨架 + 滚动扩窗」策略（默认 16）

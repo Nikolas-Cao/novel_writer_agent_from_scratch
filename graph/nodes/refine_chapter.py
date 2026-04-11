@@ -7,6 +7,10 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+from graph.chapter_prompt_defaults import (
+    DEFAULT_CHAPTER_ENDING_RULES,
+    DEFAULT_REFINE_CHAPTER_ENDING_EXTRA,
+)
 from graph.knowledge_context import format_canon_overrides
 from graph.llm import create_writer_llm
 from graph.utils import get_message_text, sanitize_chapter_markdown
@@ -71,6 +75,8 @@ async def refine_chapter_node(
         "3) 不改变核心剧情与章节结构；\n"
         "4) 仅输出润色后的章节正文，禁止输出“核心亮点/说明/总结/点评”；\n"
         "5) 禁止输出 Markdown 代码围栏（不要出现 ```markdown 或 ```）。\n\n"
+        f"{DEFAULT_CHAPTER_ENDING_RULES}\n\n"
+        f"{DEFAULT_REFINE_CHAPTER_ENDING_EXTRA}\n\n"
         f"{guard}"
         f"{style_constraint_block}"
         f"{draft}"

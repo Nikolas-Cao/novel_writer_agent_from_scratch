@@ -13,7 +13,9 @@ from config import (
     CHAPTER_WORD_TARGET,
     CHARACTER_GRAPH_RECENT_CHAPTERS,
     RAG_PREVIOUS_CHAPTERS,
+    WRITE_CHAPTER_PREV_TAIL_CHARS,
 )
+from graph.chapter_prompt_defaults import DEFAULT_CHAPTER_ENDING_RULES
 from graph.knowledge_context import build_kb_context_for_writing, format_canon_overrides
 from graph.llm import create_writer_llm
 from graph.utils import get_message_text, sanitize_chapter_markdown
@@ -45,6 +47,36 @@ def _get_chapter_outline(
                 return title, points
             idx += 1
     raise IndexError(f"Chapter index out of range: {chapter_index}")
+
+
+def _previous_chapter_tail_for_prompt(
+    store: ChapterStore,
+    project_id: str,
+    current_chapter_index: int,
+    max_chars: int,
+) -> str:
+    # 思路：
+    # 1) RAG 摘要会丢失上一章结尾的细粒度动作/对话，与「章末约束」叠加时，下一章更难自然衔接；
+    # 2) 从已落盘的上一章 Markdown 取末尾若干字，仅作衔接提示，不替代 RAG 的远距前文信息。
+    # 边界：首章无前文；文件缺失或 max_chars<=0 时返回空串；超长时截断并加「略」提示以免模型误判为全文。
+    if current_chapter_index <= 0 or max_chars <= 0:
+        return ""
+    prev_idx = current_chapter_index - 1
+    try:
+        full = store.load(project_id, prev_idx)
+    except FileNotFoundError:
+        logger.info(
+            "[write_chapter] prev_chapter_tail_skip project=%s reason=no_file chapter_index=%s",
+            project_id,
+            prev_idx,
+        )
+        return ""
+    text = full.strip()
+    if not text:
+        return ""
+    if len(text) > max_chars:
+        return "……（上文略）\n" + text[-max_chars:]
+    return text
 
 
 async def write_chapter_node(
@@ -121,6 +153,23 @@ async def write_chapter_node(
 
     points_text = "\n".join([f"- {p}" for p in points]) if points else "- （暂无要点）"
 
+    prev_tail = _previous_chapter_tail_for_prompt(
+        store,
+        project_id,
+        current_idx,
+        WRITE_CHAPTER_PREV_TAIL_CHARS,
+    )
+    prev_tail_block = ""
+    if prev_tail:
+        pnum = current_idx  # 上一章为第 current_idx 章（0-based 序号为 current_idx-1，人类可读章号 = current_idx）
+        prev_tail_block = (
+            f"【上一章正文末尾（承接上文）】\n"
+            f"以下为第{pnum}章（序号 {current_idx - 1}）已落盘正文之末尾节选，用于时空、动作与语气衔接。\n"
+            "请在本章开头自然承接下列片段所悬置的场景或动作：可顺接、可转场、可略作时间跳跃，但勿整段复述；"
+            "若与本章要点在情节推进上冲突，以本章要点为准。\n\n"
+            f"{prev_tail}\n\n"
+        )
+
     kb_assets_text = ""
     kb_evidence_text = ""
     kb_confidence: Optional[float] = None
@@ -178,10 +227,12 @@ async def write_chapter_node(
         "4) 本阶段只写当前章，不总结后续剧情；\n"
         "5) 仅输出小说章节正文本身，禁止输出“核心亮点/写作思路/总结/点评/说明”；\n"
         "6) 禁止输出 Markdown 代码围栏（不要出现 ```markdown 或 ```）。\n\n"
+        f"{DEFAULT_CHAPTER_ENDING_RULES}\n\n"
         f"{style_constraint_block}"
         f"章节标题：{title}\n"
         f"目标字数：约{word_target}字\n"
         f"章节要点：\n{points_text}\n\n"
+        f"{prev_tail_block}"
         f"前文摘要（RAG）：\n{summary_block}\n\n"
         f"当前章大纲补充（RAG）：\n{outline_chunk or '（无）'}\n\n"
         f"相关人物与关系摘要：\n{character_summary}"

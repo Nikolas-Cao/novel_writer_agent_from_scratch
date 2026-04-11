@@ -50,6 +50,8 @@ PLOT_IDEAS_COUNT = int(os.getenv("PLOT_IDEAS_COUNT", "5"))
 RAG_PREVIOUS_CHAPTERS = int(os.getenv("RAG_PREVIOUS_CHAPTERS", "5"))
 # 人物图谱滑动窗口：写章时只使用最近 N 章内出现的关系
 CHARACTER_GRAPH_RECENT_CHAPTERS = int(os.getenv("CHARACTER_GRAPH_RECENT_CHAPTERS", "5"))
+# 写第 n 章时注入「第 n-1 章」正文末尾字符数，便于承接悬置动作（0 表示关闭）
+WRITE_CHAPTER_PREV_TAIL_CHARS = int(os.getenv("WRITE_CHAPTER_PREV_TAIL_CHARS", "1200"))
 
 # ----- 本地路径（落盘到项目内或可配置目录） -----
 _project_root = Path(__file__).resolve().parent
